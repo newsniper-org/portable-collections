@@ -1,0 +1,23 @@
+[package]
+name = "portable-queues"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Portable, no_std queue, stack, deque, and priority queue data structures."
+keywords = ["queue", "stack", "deque", "priority_queue", "no_std"]
+categories = ["data-structures", "no-std"]
+
+[features]
+# no_std + alloc is the default. Enable `std` only to add `std::error::Error`
+# impls for the error types (the data structures themselves never need std).
+default = []
+std = ["portable-collection-primitives/std"]
+
+[dependencies]
+portable-collection-primitives = { workspace = true }
+
+[lints]
+workspace = true

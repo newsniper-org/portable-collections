@@ -1,0 +1,19 @@
+[package]
+name = "portable-collection-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Common types and functions for the subcrates of portable-collections"
+
+[features]
+# no_std + alloc is the default. Enable `std` only to add `std::error::Error`
+# impls for the error types (the data structures themselves never need std).
+default = []
+std = []
+
+
+[lints]
+workspace = true

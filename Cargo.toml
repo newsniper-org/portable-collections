@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["portable-bijectives", "portable-maps-and-sets", "portable-queues", "portable-collection-primitives"]
+
+# Shared metadata for every `portable-collections` crate. New members inherit
+# these with `field.workspace = true` in their own `[package]`.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0 OR MIT"
+repository = ""
+authors = ["윤병익 <yeun0908@gmail.com, newsniper@protonmail.com>"]
+
+
+# Every crate in this workspace is no_std-friendly and unsafe-free by policy.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+
+[workspace.dependencies]
+portable-collection-primitives = { path = "./portable-collection-primitives/" }

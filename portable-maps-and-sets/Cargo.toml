@@ -1,0 +1,22 @@
+[package]
+name = "portable-maps-and-sets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Portable, no_std map and set data structures."
+keywords = ["set", "map", "no_std"]
+categories = ["data-structures", "no-std"]
+
+[features]
+# no_std + alloc is the default. Enable `std` only to add `std::error::Error`
+# impls for the error types (the data structures themselves never need std).
+default = []
+std = []
+
+[dependencies]
+
+[lints]
+workspace = true
