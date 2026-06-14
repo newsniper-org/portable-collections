@@ -16,9 +16,13 @@ categories = ["data-structures", "no-std"]
 default = ["alloc"]
 alloc = ["portable-collection-primitives/alloc"]
 std = ["portable-collection-primitives/std"]
+unstable = ["portable-collection-primitives/unstable"]
 
 [dependencies]
 portable-collection-primitives = { workspace = true, default-features = false }
+
+[build-dependencies]
+rustc_version.workspace = true
 
 [lints]
 workspace = true

@@ -1,5 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-#![forbid(unsafe_code)]
+// `unsafe_code = "forbid"` is set unconditionally in `[workspace.lints]`, so no
+// crate-level forbid is needed (and a conditional one would be inert anyway).
+#![cfg_attr(all(feature = "unstable", not(toolchain_channel="stable")), feature(allocator_api))]
 
 /// Split a chunk of items into a `std` branch and a non-`std` branch.
 ///
@@ -339,5 +341,97 @@ ifstd!({
 
 
 
+#[macro_export]
+macro_rules! wrap_into_map_traits {
+    (
+        $map:ident $(< $( $extra:ident $( : [ $( $sb:tt )+ ] )? ),+ >)?
+        $(, K: [ $( $kb:tt )+ ])?
+        $(, Q: [ $( $qb:tt )+ ])?
+        $(, V: [ $( $vb:tt )+ ])?
+        $(,)?
+    ) => {
+        impl <
+            K: $($( $kb )+ +)? ::core::borrow::Borrow<Q>,
+            Q: $($( $qb )+ +)? ?Sized,
+            V$(: $( $vb )+)?
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::MapShim<K, Q, V> for $map<K, V $($(, $extra)+)?> {
+            #[inline] fn get(&self, key: &Q) -> Option<&V> { $map::get(self, key) }
+            #[inline] fn get_mut(&mut self, key: &Q) -> Option<&mut V> { $map::get_mut(self, key) }
+            #[inline] fn remove(&mut self, key: &Q) -> Option<V> { $map::remove(self, key) }
+            #[inline] fn insert(&mut self, key: K, value: V) -> Option<V> { $map::insert(self, key, value) }
+            #[inline] fn contains_key(&self, key: &Q) -> bool { $map::contains_key(self, key) }
+        }
+
+        impl <
+            K$(: $( $kb )+)?,
+            V$(: $( $vb )+)?
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::Map<K, V> for $map<K, V $($(, $extra)+)?> { }
+
+        impl <
+            K$(: $( $kb )+)?,
+            V$(: $( $vb )+)?
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::Container for $map<K, V $($(, $extra)+)?> {
+            #[inline] fn clear(&mut self) { $map::clear(self); }
+            #[inline] fn len(&self) -> usize { $map::len(self) }
+            #[inline] fn is_empty(&self) -> bool { $map::is_empty(self) }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! wrap_into_set_traits {
+    (
+        $set:ident $(< $( $extra:ident $( : [ $( $sb:tt )+ ] )? ),+ >)?
+         , $ut:ident $(< $( $ug:ident ),+ >)?
+        $(, T: [ $( $tb:tt )+ ])?
+        $(, Q: [ $( $qb:tt )+ ])?
+        $(,)?
+    ) => {
+        impl <
+            T: $($( $tb )+ +)? ::core::borrow::Borrow<Q>,
+            Q: $($( $qb )+ +)? ?Sized
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::SetShim<T, Q> for $set<T $($(, $extra)+)?> {
+            type Union<'a> = $ut<'a, T $($(, $ug)+)?> where Self: 'a;
+            #[inline] fn get(&self, value: &Q) -> Option<&T> { $set::get(self, value) }
+            #[inline] fn remove(&mut self, value: &Q) -> bool { $set::remove(self, value) }
+            #[inline] fn insert(&mut self, value: T) -> bool { $set::insert(self, value) }
+            #[inline] fn contains(&self, value: &Q) -> bool { $set::contains(self, value) }
+            #[inline] fn union<'a>(&'a self, other: &'a Self) -> Self::Union<'a> { $set::union(self, other) }
+            #[inline] fn is_disjoint(&self, other: &Self) -> bool { $set::is_disjoint(self, other) }
+            #[inline] fn is_subset(&self, other: &Self) -> bool { $set::is_subset(self, other) }
+            #[inline] fn is_superset(&self, other: &Self) -> bool { $set::is_superset(self, other) }
+            #[inline] fn replace(&mut self, value: T) -> Option<T> { $set::replace(self, value) }
+            #[inline] fn take(&mut self, value: &Q) -> Option<T> { $set::take(self, value) }
+        }
+
+        impl <
+            T$(: $( $tb )+)?
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::Set<T> for $set<T $($(, $extra)+)?> { }
+
+        impl <
+            T$(: $( $tb )+)?
+            $($(, $extra $( : $( $sb )+ )? )+)?
+        > crate::primitives::Container for $set<T $($(, $extra)+)?> {
+            #[inline] fn clear(&mut self) { $set::clear(self); }
+            #[inline] fn len(&self) -> usize { $set::len(self) }
+            #[inline] fn is_empty(&self) -> bool { $set::is_empty(self) }
+        }
+    };
+}
+
+
 pub mod primitives;
 pub use primitives::{Checkpoint, ScopedRollback};
+// The Map/Set trait family lives behind `ifstdoralloc!`, so re-export it only on
+// the tiers where it exists (alloc or std) — a bare-no_std re-export would be an
+// unresolved import.
+ifstdoralloc!({
+    pub use primitives::{Container, Map, MapShim, Set, SetShim};
+});
+pub mod trees;
+pub mod hashkvs;

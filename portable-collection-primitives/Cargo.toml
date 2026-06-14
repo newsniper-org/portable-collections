@@ -14,7 +14,11 @@ description = "Common types and functions for the subcrates of portable-collecti
 default = ["alloc"]
 alloc = []
 std = []
+unstable = []
 
 
 [lints]
 workspace = true
+
+[build-dependencies]
+rustc_version.workspace = true

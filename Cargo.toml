@@ -7,16 +7,18 @@ members = ["portable-bijectives", "portable-maps-and-sets", "portable-queues", "
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.77"
 license = "Apache-2.0 OR MIT"
 repository = ""
 authors = ["윤병익 <yeun0908@gmail.com, newsniper@protonmail.com>"]
 
 
-# Every crate in this workspace is no_std-friendly and unsafe-free by policy.
+# Every crate in this workspace is no_std-friendly by policy.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(toolchain_channel, values("stable", "beta", "nightly", "dev"))'] }
 
 
 [workspace.dependencies]
 portable-collection-primitives = { path = "./portable-collection-primitives/", default-features = false }
+rustc_version = { version = "0.4" }
