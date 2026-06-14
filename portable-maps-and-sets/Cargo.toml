@@ -14,9 +14,10 @@ categories = ["data-structures", "no-std"]
 # no_std + alloc is the default. Enable `std` only to add `std::error::Error`
 # impls for the error types (the data structures themselves never need std).
 default = []
-std = []
+std = ["portable-collection-primitives/std"]
 
 [dependencies]
+portable-collection-primitives = { workspace = true }
 
 [lints]
 workspace = true
