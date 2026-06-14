@@ -19,4 +19,4 @@ unsafe_code = "forbid"
 
 
 [workspace.dependencies]
-portable-collection-primitives = { path = "./portable-collection-primitives/" }
+portable-collection-primitives = { path = "./portable-collection-primitives/", default-features = false }
