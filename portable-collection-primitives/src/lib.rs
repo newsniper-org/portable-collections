@@ -174,7 +174,7 @@ macro_rules! group {
         { $($attrs:tt)* }
         { $($body:tt)* }
     ) => {
-        $crate::group!(@each [$($attrs)*] $($body)*)
+        $crate::group!(@each [$($attrs)*] $($body)*);
     };
 
     // Base case: no items left.
@@ -183,7 +183,7 @@ macro_rules! group {
     // Recurse: peel one item off the front and re-attach the attribute prefix.
     (@each [$($attrs:tt)*] $item:item $($rest:tt)*) => {
         $($attrs)* $item
-        $crate::group!(@each [$($attrs)*] $($rest)*)
+        $crate::group!(@each [$($attrs)*] $($rest)*);
     };
 }
 
@@ -265,12 +265,12 @@ macro_rules! implgroup_for {
 
     // Attribute spotted: start collecting attributes for this impl.
     (@for_type $ty:ty; #[$($attr:tt)*] $($rest:tt)*) => {
-        implgroup_for!(@attrs [$ty] [#[$($attr)*]] $($rest)*)
+        implgroup_for!(@attrs [$ty] [#[$($attr)*]] $($rest)*);
     };
 
     // No attributes — straight into the impl header.
     (@for_type $ty:ty; impl $($rest:tt)*) => {
-        implgroup_for!(@trait [$ty] [] [] $($rest)*)
+        implgroup_for!(@trait [$ty] [] [] $($rest)*);
     };
 
     //—————————————————————————————————
@@ -279,12 +279,12 @@ macro_rules! implgroup_for {
 
     // Another attribute — keep accumulating.
     (@attrs [$ty:ty] [$($attrs:tt)*] #[$($attr:tt)*] $($rest:tt)*) => {
-        implgroup_for!(@attrs [$ty] [$($attrs)* #[$($attr)*]] $($rest)*)
+        implgroup_for!(@attrs [$ty] [$($attrs)* #[$($attr)*]] $($rest)*);
     };
 
     // `impl` reached — switch to trait-spec accumulation.
     (@attrs [$ty:ty] [$($attrs:tt)*] impl $($rest:tt)*) => {
-        implgroup_for!(@trait [$ty] [$($attrs)*] [] $($rest)*)
+        implgroup_for!(@trait [$ty] [$($attrs)*] [] $($rest)*);
     };
 
     //—————————————————————————————————
@@ -296,17 +296,17 @@ macro_rules! implgroup_for {
     // `{ body }` reached — emit the impl.
     (@trait [$ty:ty] [$($attrs:tt)*] [$($spec:tt)*] { $($body:tt)* } $($next:tt)*) => {
         $($attrs)* impl $($spec)* for $ty { $($body)* }
-        implgroup_for!(@for_type $ty; $($next)*)
+        implgroup_for!(@for_type $ty; $($next)*);
     };
 
     // `where` reached — switch to where-clause accumulation.
     (@trait [$ty:ty] [$($attrs:tt)*] [$($spec:tt)*] where $($rest:tt)*) => {
-        implgroup_for!(@where [$ty] [$($attrs)*] [$($spec)*] [] $($rest)*)
+        implgroup_for!(@where [$ty] [$($attrs)*] [$($spec)*] [] $($rest)*);
     };
 
     // Accumulate one more token of the trait spec.
     (@trait [$ty:ty] [$($attrs:tt)*] [$($spec:tt)*] $tok:tt $($rest:tt)*) => {
-        implgroup_for!(@trait [$ty] [$($attrs)*] [$($spec)* $tok] $($rest)*)
+        implgroup_for!(@trait [$ty] [$($attrs)*] [$($spec)* $tok] $($rest)*);
     };
 
     //—————————————————————————————————
@@ -316,12 +316,12 @@ macro_rules! implgroup_for {
     // `{ body }` reached — emit the impl with the where clause.
     (@where [$ty:ty] [$($attrs:tt)*] [$($spec:tt)*] [$($wh:tt)*] { $($body:tt)* } $($next:tt)*) => {
         $($attrs)* impl $($spec)* for $ty where $($wh)* { $($body)* }
-        implgroup_for!(@for_type $ty; $($next)*)
+        implgroup_for!(@for_type $ty; $($next)*);
     };
 
     // Accumulate one more where-clause token.
     (@where [$ty:ty] [$($attrs:tt)*] [$($spec:tt)*] [$($wh:tt)*] $tok:tt $($rest:tt)*) => {
-        implgroup_for!(@where [$ty] [$($attrs)*] [$($spec)*] [$($wh)* $tok] $($rest)*)
+        implgroup_for!(@where [$ty] [$($attrs)*] [$($spec)*] [$($wh)* $tok] $($rest)*);
     };
 }
 
@@ -330,11 +330,14 @@ ifstd!({
     #[allow(unused_imports)]
     use std::fmt;
 } else {
-    extern crate alloc;
-    #[allow(unused_imports)]
-    use core::fmt;
+    ifalloc!({
+        extern crate alloc;
+        #[allow(unused_imports)]
+        use core::fmt;
+    });
 });
 
 
 
 pub mod primitives;
+pub use primitives::{Checkpoint, ScopedRollback};

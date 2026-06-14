@@ -31,13 +31,15 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
-use portable_collection_primitives::{ifstd, ifalloc, ifstdoralloc};
+use portable_collection_primitives::{ifstd, ifstdoralloc};
 
 ifstd!({
     use std::collections::BTreeMap;
     use std::vec::Vec;
     use std::fmt;
+    use portable_collection_primitives::implgroup_for;
 } else {
+    use portable_collection_primitives::ifalloc;
     ifalloc!({
         extern crate alloc;
         use alloc::collections::BTreeMap;
@@ -49,6 +51,8 @@ ifstd!({
 
 
 ifstdoralloc!({
+    use portable_collection_primitives::{Checkpoint, ScopedRollback};
+
     /// A scope-checkpointed bijection `K ↔ V` with an insertion-order log.
     ///
     /// Every entry is a 1-to-1 pair: a key maps to exactly one value and a value to
@@ -95,9 +99,25 @@ ifstdoralloc!({
         /// An opaque checkpoint of the current size, for a later
         /// [`truncate`](Self::truncate). It is exactly the current [`len`](Self::len);
         /// callers that nest scopes save one of these per scope.
+        ///
+        /// Note: with [`ScopedRollback`] in scope, `m.checkpoint()` still
+        /// resolves to *this* inherent method (returning `usize`) — inherent
+        /// methods shadow trait methods in call syntax. For the typed
+        /// [`Checkpoint`] mark use [`checkpoint_mark`](Self::checkpoint_mark) or
+        /// the fully-qualified `ScopedRollback::checkpoint(&m)`.
         #[must_use]
         pub fn checkpoint(&self) -> usize {
             self.order.len()
+        }
+
+        /// Like [`checkpoint`](Self::checkpoint) but returns a typed, opaque
+        /// [`Checkpoint`] mark — recommended for callers who store a mark
+        /// alongside other counts and want the type to stop a mix-up (e.g. an
+        /// SMT solver keeping it next to `num_vars`). The bare-`usize`
+        /// [`checkpoint`](Self::checkpoint) stays for index-flavored callers.
+        #[must_use]
+        pub fn checkpoint_mark(&self) -> Checkpoint {
+            Checkpoint::from_len(self.order.len())
         }
 
         /// The entries in insertion order (the same order [`iter`](Self::iter)
@@ -189,6 +209,29 @@ ifstdoralloc!({
         }
     }
 
+    /// The shared scope-rollback contract. `checkpoint`/`rollback_to` are the
+    /// typed-mark twins of the inherent `checkpoint`/`truncate`: every backing
+    /// store (`fwd`, `rev`, `order`) rolls back together, satisfying the
+    /// [`ScopedRollback`] five-law contract (round-trip, atomic-across-stores,
+    /// LIFO, overshoot-no-op, idempotent). The inherent `usize` methods are kept
+    /// for index-flavored callers; this impl adds the desync-proof typed path.
+    impl<K: Ord + Clone, V: Ord + Clone> ScopedRollback for BTreeBimap<K, V> {
+        type Mark = Checkpoint;
+
+        fn checkpoint(&self) -> Checkpoint {
+            self.checkpoint_mark()
+        }
+
+        fn rollback_to(&mut self, mark: Checkpoint) {
+            self.truncate(mark.as_len());
+        }
+
+        fn clear(&mut self) {
+            // Delegate to the inherent clear (fwd + rev + order together).
+            BTreeBimap::clear(self);
+        }
+    }
+
     impl<K, V> Default for BTreeBimap<K, V> {
         fn default() -> Self {
             Self::new()
@@ -235,8 +278,14 @@ ifstdoralloc!({
         }
     }
 
-    #[cfg(feature = "std")]
-    impl<K: fmt::Debug, V: fmt::Debug> std::error::Error for InsertError<K, V> {}
+    ifstd!({
+        implgroup_for! {
+            { InsertError<K, V> }
+            {
+                impl<K: fmt::Debug, V: fmt::Debug> ::std::error::Error {}
+            }
+        }
+    });
 
     #[cfg(test)]
     mod tests {
@@ -365,8 +414,11 @@ ifstdoralloc!({
             m.insert(20, 2).unwrap();
             let ks: Vec<u32> = m.keys().copied().collect();
             let vs: Vec<u32> = m.values().copied().collect();
-            assert_eq!(ks, alloc::vec![30, 10, 20]); // insertion order, NOT sorted
-            assert_eq!(vs, alloc::vec![0, 1, 2]);
+            // Compare against array literals (not `alloc::vec!`) so the test
+            // builds under the `std` import branch too, where `alloc` isn't
+            // `extern crate`-d. `Vec<u32>: PartialEq<[u32; N]>` covers this.
+            assert_eq!(ks, [30, 10, 20]); // insertion order, NOT sorted
+            assert_eq!(vs, [0, 1, 2]);
         }
 
         #[test]
@@ -377,6 +429,55 @@ ifstdoralloc!({
             m.insert("y", 1).unwrap();
             assert_eq!(m.get(&"x"), Some(&0));
             assert_eq!(m.get_key(&1), Some(&"y"));
+        }
+
+        #[test]
+        fn scoped_rollback_trait_path_satisfies_contract() {
+            // Exercises the `ScopedRollback` trait API directly — the tests
+            // above only cover the inherent `usize`/`truncate` path. Verifies
+            // the five-law contract through the typed-mark methods.
+            use portable_collection_primitives::{Checkpoint, ScopedRollback};
+            let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
+            m.insert(10, 0).unwrap();
+            let mark: Checkpoint = ScopedRollback::checkpoint(&m);
+            m.insert(11, 1).unwrap();
+            m.insert(12, 2).unwrap();
+            // Laws 1 + 2: rollback_to drops everything after the mark, in BOTH
+            // directions, atomically.
+            ScopedRollback::rollback_to(&mut m, mark);
+            assert_eq!(m.len(), 1);
+            assert_eq!(m.get(&11), None);
+            assert_eq!(m.get(&12), None);
+            assert_eq!(m.get_key(&1), None);
+            assert_eq!(m.get_key(&2), None);
+            assert_eq!(m.get(&10), Some(&0));
+            assert_eq!(m.get_key(&0), Some(&10));
+            // Law 5: idempotent.
+            ScopedRollback::rollback_to(&mut m, mark);
+            assert_eq!(m.len(), 1);
+            // Law 4: a mark at/beyond the current size is a no-op.
+            ScopedRollback::rollback_to(&mut m, Checkpoint::from_len(999));
+            assert_eq!(m.len(), 1);
+            // ORIGIN rolls all the way back (empties every store).
+            ScopedRollback::rollback_to(&mut m, Checkpoint::ORIGIN);
+            assert!(m.is_empty());
+            assert_eq!(m.get(&10), None);
+            assert_eq!(m.get_key(&0), None);
+        }
+
+        #[test]
+        fn checkpoint_mark_agrees_with_inherent_and_trait_clear_empties() {
+            use portable_collection_primitives::{Checkpoint, ScopedRollback};
+            let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
+            m.insert(1, 10).unwrap();
+            m.insert(2, 20).unwrap();
+            // The typed mark and the bare-usize checkpoint agree on the length.
+            assert_eq!(m.checkpoint_mark(), Checkpoint::from_len(m.checkpoint()));
+            // Trait `clear` delegates to the inherent clear (all three stores).
+            ScopedRollback::clear(&mut m);
+            assert!(m.is_empty());
+            assert_eq!(m.get(&1), None);
+            assert_eq!(m.get_key(&20), None);
         }
     }
 });
