@@ -14,8 +14,12 @@ ifstd!({
 });
 
 pub mod btree_bimap;
-// `BTreeBimap`/`InsertError` live behind `ifstdoralloc!`, so re-export them only
-// where they exist (alloc or std); a bare-no_std re-export would be unresolved.
+pub mod flat_radix_bimap;
+pub use flat_radix_bimap::DenseIndex; // heap-free, available in every tier
+// `BTreeBimap`/`FlatRadixBimap`/`InsertError` live behind `ifstdoralloc!`, so
+// re-export them only where they exist (alloc or std); a bare-no_std re-export
+// would be unresolved.
 ifstdoralloc!({
     pub use btree_bimap::{BTreeBimap, InsertError};
+    pub use flat_radix_bimap::FlatRadixBimap;
 });
