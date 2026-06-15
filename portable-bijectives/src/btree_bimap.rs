@@ -66,7 +66,7 @@ ifstd!({
 
 
 ifstdoralloc!({
-    use portable_collection_primitives::{Checkpoint, ScopedRollback};
+    use portable_collection_primitives::{Checkpoint, ScopedRollback, Bimap, Container};
 
     /// A scope-checkpointed bijection `K ↔ V` with an insertion-order log.
     ///
@@ -409,10 +409,41 @@ ifstdoralloc!({
         fn rollback_to(&mut self, mark: Checkpoint) {
             self.truncate(mark.as_len());
         }
+    }
 
+    #[cfg(all(feature = "unstable", not(toolchain_channel = "stable")))]
+    impl<K, V, A: Allocator + Clone> Container for BTreeBimap<K, V, A> {
         fn clear(&mut self) {
-            // Delegate to the inherent clear (fwd + rev + order together).
+            // fwd + rev + order together.
             BTreeBimap::clear(self);
+        }
+        fn len(&self) -> usize {
+            BTreeBimap::len(self)
+        }
+    }
+
+    #[cfg(all(feature = "unstable", not(toolchain_channel = "stable")))]
+    impl<K: Ord + Clone, V: Ord + Clone, A: Allocator + Clone> Bimap<K, V> for BTreeBimap<K, V, A> {
+        type InsertError = InsertError<K, V>;
+
+        fn get_by_key(&self, key: &K) -> Option<&V> {
+            self.get(key)
+        }
+
+        fn get_by_value(&self, value: &V) -> Option<&K> {
+            self.get_key(value)
+        }
+
+        fn insert(&mut self, key: K, value: V) -> Result<(), InsertError<K, V>> {
+            BTreeBimap::insert(self, key, value)
+        }
+
+        fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)>
+        where
+            K: 'a,
+            V: 'a,
+        {
+            BTreeBimap::iter(self)
         }
     }
     #[cfg(not(all(feature = "unstable", not(toolchain_channel = "stable"))))]
@@ -426,10 +457,41 @@ ifstdoralloc!({
         fn rollback_to(&mut self, mark: Checkpoint) {
             self.truncate(mark.as_len());
         }
+    }
 
+    #[cfg(not(all(feature = "unstable", not(toolchain_channel = "stable"))))]
+    impl<K, V> Container for BTreeBimap<K, V> {
         fn clear(&mut self) {
-            // Delegate to the inherent clear (fwd + rev + order together).
+            // fwd + rev + order together.
             BTreeBimap::clear(self);
+        }
+        fn len(&self) -> usize {
+            BTreeBimap::len(self)
+        }
+    }
+
+    #[cfg(not(all(feature = "unstable", not(toolchain_channel = "stable"))))]
+    impl<K: Ord + Clone, V: Ord + Clone> Bimap<K, V> for BTreeBimap<K, V> {
+        type InsertError = InsertError<K, V>;
+
+        fn get_by_key(&self, key: &K) -> Option<&V> {
+            self.get(key)
+        }
+
+        fn get_by_value(&self, value: &V) -> Option<&K> {
+            self.get_key(value)
+        }
+
+        fn insert(&mut self, key: K, value: V) -> Result<(), InsertError<K, V>> {
+            BTreeBimap::insert(self, key, value)
+        }
+
+        fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)>
+        where
+            K: 'a,
+            V: 'a,
+        {
+            BTreeBimap::iter(self)
         }
     }
 
@@ -678,17 +740,47 @@ ifstdoralloc!({
 
         #[test]
         fn checkpoint_mark_agrees_with_inherent_and_trait_clear_empties() {
-            use portable_collection_primitives::{Checkpoint, ScopedRollback};
+            use portable_collection_primitives::{Checkpoint, Container};
             let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
             m.insert(1, 10).unwrap();
             m.insert(2, 20).unwrap();
             // The typed mark and the bare-usize checkpoint agree on the length.
             assert_eq!(m.checkpoint_mark(), Checkpoint::from_len(m.checkpoint()));
-            // Trait `clear` delegates to the inherent clear (all three stores).
-            ScopedRollback::clear(&mut m);
+            // `clear` now lives on the `Container` supertrait; it still delegates
+            // to the inherent clear (all three stores).
+            Container::clear(&mut m);
             assert!(m.is_empty());
             assert_eq!(m.get(&1), None);
             assert_eq!(m.get_key(&20), None);
+        }
+
+        #[test]
+        fn bimap_trait_path() {
+            // Exercises the `Bimap` facade end-to-end: lookups/insert/iter on
+            // `Bimap`, len/is_empty/clear from the `Container` supertrait, and
+            // checkpoint/rollback from the `ScopedRollback` supertrait.
+            use portable_collection_primitives::{Bimap, Container, ScopedRollback, Checkpoint};
+            let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
+            Bimap::insert(&mut m, 1, 10).unwrap();
+            Bimap::insert(&mut m, 2, 20).unwrap();
+            // Both directions, owned (no Borrow shim).
+            assert_eq!(Bimap::get_by_key(&m, &1), Some(&10));
+            assert_eq!(Bimap::get_by_value(&m, &20), Some(&2));
+            // Container supertrait.
+            assert_eq!(Container::len(&m), 2);
+            assert!(!Container::is_empty(&m));
+            // iter() in insertion order.
+            let pairs: Vec<(u32, u32)> = Bimap::iter(&m).map(|(&k, &v)| (k, v)).collect();
+            assert_eq!(pairs, [(1, 10), (2, 20)]);
+            // checkpoint/rollback via the ScopedRollback supertrait.
+            let mark: Checkpoint = ScopedRollback::checkpoint(&m);
+            Bimap::insert(&mut m, 3, 30).unwrap();
+            ScopedRollback::rollback_to(&mut m, mark);
+            assert_eq!(Container::len(&m), 2);
+            assert_eq!(Bimap::get_by_key(&m, &3), None);
+            // Container::clear empties every store.
+            Container::clear(&mut m);
+            assert!(Container::is_empty(&m));
         }
     }
 });

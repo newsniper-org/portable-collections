@@ -80,7 +80,7 @@ impl Checkpoint {
 ///    `c.rollback_to(m)`.
 ///
 /// These laws are a documented obligation; the workspace tests them per type.
-pub trait ScopedRollback {
+pub trait ScopedRollback: super::Container {
     /// The opaque mark type. A backend backed by a dense count uses
     /// [`Checkpoint`] (write `type Mark = Checkpoint;`); a backend whose natural
     /// mark is not a length — e.g. a generation id for a persistent or radix
@@ -100,13 +100,9 @@ pub trait ScopedRollback {
     /// stores, per the contract above. Overshooting marks are no-ops (law 4).
     fn rollback_to(&mut self, mark: Self::Mark);
 
-    /// Discard every entry.
-    ///
-    /// Not derivable generically — the origin mark is `Mark`-specific — so it is
-    /// a required method; for `Mark = Checkpoint` an impl is one line
-    /// (`self.rollback_to(Checkpoint::ORIGIN)`), but a backend may clear more
-    /// directly.
-    fn clear(&mut self);
+    // `clear` is inherited from the [`Container`](super::Container) supertrait
+    // (clearing is `rollback_to(origin)` for `Mark = Checkpoint`, but a backend
+    // may clear more directly).
 }
 
 #[cfg(test)]

@@ -1,17 +1,15 @@
+mod container;
+pub use container::Container;
 mod checkpointing;
 pub use checkpointing::{Checkpoint, ScopedRollback};
+mod bijection;
+pub use bijection::Bimap;
 
 ifstdoralloc!({
     // `core::borrow::Borrow` is also reachable as `std::borrow::Borrow`; living
     // inside `ifstdoralloc!` keeps it out of the bare-no_std build (where the
     // Map/Set traits that use it are absent), avoiding an unused-import warning.
     use core::borrow::Borrow;
-
-    pub trait Container {
-        fn clear(&mut self);
-        fn len(&self) -> usize;
-        fn is_empty(&self) -> bool;
-    }
 
     pub trait Map<K, V> : Container {
         fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
