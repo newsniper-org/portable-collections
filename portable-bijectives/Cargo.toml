@@ -26,3 +26,10 @@ rustc_version.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["cargo_bench_support", "plotters", "csv", "csv_output", "html_reports", "stable"] }
+
+[[bench]]
+name = "bimap_bench"
+harness = false

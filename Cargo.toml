@@ -22,3 +22,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(toolchain_channel, values(
 [workspace.dependencies]
 portable-collection-primitives = { path = "./portable-collection-primitives/", default-features = false }
 rustc_version = { version = "0.4" }
+criterion = { version = "0.5.1", features = ["cargo_bench_support", "plotters", "csv", "csv_output", "html_reports", "stable"] }
