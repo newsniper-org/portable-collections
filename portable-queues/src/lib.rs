@@ -21,6 +21,12 @@ ifstdoralloc!({
     pub use vec_log::VecLog;
 });
 
+pub mod vec_queue;
+// `VecQueue` needs `VecDeque` (alloc), so re-export it only on the alloc/std tiers.
+ifstdoralloc!({
+    pub use vec_queue::VecQueue;
+});
+
 pub mod heapless_log;
 // `HeaplessLog` is alloc-free (fixed inline array), so it is available everywhere.
 pub use heapless_log::HeaplessLog;
