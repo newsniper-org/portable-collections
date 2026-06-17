@@ -1,4 +1,5 @@
-//! [`VecQueue`] — the canonical `VecDeque`-backed [`ScopedQueue`] implementation.
+//! [`DequeScopedQueue`] — the canonical `VecDeque`-backed [`ScopedQueue`]
+//! implementation.
 
 use portable_collection_primitives::{ifstd, ifstdoralloc};
 
@@ -16,8 +17,8 @@ ifstdoralloc!({
     use portable_collection_primitives::{Checkpoint, Container, Pull, Push, ScopedQueue, ScopedRollback};
 
     /// A `VecDeque`-backed **FIFO** append-log with scope checkpoint/rollback — the
-    /// queue-flavored sibling of `VecLog`. [`push`](Push::push) appends at the
-    /// back; [`pull`](Pull::pull) consumes at the front; `drain_since` peels the
+    /// queue-flavored sibling of `VecScopedStack`. [`push`](Push::push) appends at
+    /// the back; [`pull`](Pull::pull) consumes at the front; `drain_since` peels the
     /// post-mark suffix off the back in FIFO (push) order.
     ///
     /// **Scope semantics (push-scoped).** Because push (back) and pull (front)
@@ -30,14 +31,14 @@ ifstdoralloc!({
     /// scope's own freshly-pushed items inside the same scope is outside that
     /// contract.
     #[derive(Clone, Debug)]
-    pub struct VecQueue<T> {
+    pub struct DequeScopedQueue<T> {
         items: VecDeque<T>,
         /// Total items ever pushed — the checkpoint mark space. `pull` does NOT
         /// decrement it (pull is a front-consume, not a push-rollback).
         gen: usize,
     }
 
-    impl<T> VecQueue<T> {
+    impl<T> DequeScopedQueue<T> {
         /// Create an empty queue.
         #[must_use]
         pub const fn new() -> Self {
@@ -50,13 +51,13 @@ ifstdoralloc!({
         }
     }
 
-    impl<T> Default for VecQueue<T> {
+    impl<T> Default for DequeScopedQueue<T> {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl<T> Container for VecQueue<T> {
+    impl<T> Container for DequeScopedQueue<T> {
         fn clear(&mut self) {
             self.items.clear();
             self.gen = 0;
@@ -66,14 +67,14 @@ ifstdoralloc!({
         }
     }
 
-    impl<T> Push<T> for VecQueue<T> {
+    impl<T> Push<T> for DequeScopedQueue<T> {
         fn push(&mut self, item: T) {
             self.items.push_back(item);
             self.gen += 1;
         }
     }
 
-    impl<T> Pull<T> for VecQueue<T> {
+    impl<T> Pull<T> for DequeScopedQueue<T> {
         fn pull(&mut self) -> Option<T> {
             self.items.pop_front()
         }
@@ -82,7 +83,7 @@ ifstdoralloc!({
         }
     }
 
-    impl<T> ScopedRollback for VecQueue<T> {
+    impl<T> ScopedRollback for DequeScopedQueue<T> {
         type Mark = Checkpoint;
 
         fn checkpoint(&self) -> Checkpoint {
@@ -106,7 +107,7 @@ ifstdoralloc!({
         }
     }
 
-    impl<T> ScopedQueue<T> for VecQueue<T> {
+    impl<T> ScopedQueue<T> for DequeScopedQueue<T> {
         fn drain_since(&mut self, mark: Checkpoint) -> impl Iterator<Item = T> + '_ {
             let target = mark.as_len();
             let n = self.gen.saturating_sub(target).min(self.items.len());
@@ -124,7 +125,7 @@ ifstdoralloc!({
 
         #[test]
         fn push_pull_fifo() {
-            let mut q: VecQueue<u32> = VecQueue::new();
+            let mut q: DequeScopedQueue<u32> = DequeScopedQueue::new();
             q.push(1);
             q.push(2);
             q.push(3);
@@ -138,7 +139,7 @@ ifstdoralloc!({
 
         #[test]
         fn drain_since_yields_fifo_and_rolls_back_pushes() {
-            let mut q: VecQueue<u32> = VecQueue::new();
+            let mut q: DequeScopedQueue<u32> = DequeScopedQueue::new();
             q.push(1);
             let mark = ScopedRollback::checkpoint(&q);
             q.push(2);
@@ -156,7 +157,7 @@ ifstdoralloc!({
 
         #[test]
         fn rollback_to_is_the_silent_twin_for_pushes() {
-            let mut q: VecQueue<u32> = VecQueue::new();
+            let mut q: DequeScopedQueue<u32> = DequeScopedQueue::new();
             q.push(1);
             let mark = ScopedRollback::checkpoint(&q);
             q.push(2);
@@ -168,7 +169,7 @@ ifstdoralloc!({
 
         #[test]
         fn rollback_overshoot_is_noop() {
-            let mut q: VecQueue<u32> = VecQueue::new();
+            let mut q: DequeScopedQueue<u32> = DequeScopedQueue::new();
             q.push(1);
             let big = Checkpoint::from_len(99);
             ScopedRollback::rollback_to(&mut q, big);
@@ -179,7 +180,7 @@ ifstdoralloc!({
         fn pull_does_not_break_a_later_rollback() {
             // The "build inside, drain outside" pattern: push in a scope, pull the
             // committed prefix, then roll the scope's pushes back.
-            let mut q: VecQueue<u32> = VecQueue::new();
+            let mut q: DequeScopedQueue<u32> = DequeScopedQueue::new();
             q.push(10); // committed (pre-scope)
             let mark = ScopedRollback::checkpoint(&q);
             q.push(20);

@@ -15,18 +15,18 @@ ifstd!({
     });
 });
 
-pub mod vec_log;
-// `VecLog` needs `Vec` (alloc), so re-export it only on the alloc/std tiers.
+pub mod vec_scoped_stack;
+// `VecScopedStack` needs `Vec` (alloc), so re-export it only on the alloc/std tiers.
 ifstdoralloc!({
-    pub use vec_log::VecLog;
+    pub use vec_scoped_stack::VecScopedStack;
 });
 
-pub mod vec_queue;
-// `VecQueue` needs `VecDeque` (alloc), so re-export it only on the alloc/std tiers.
+pub mod deque_scoped_queue;
+// `DequeScopedQueue` needs `VecDeque` (alloc), so re-export it only on the alloc/std tiers.
 ifstdoralloc!({
-    pub use vec_queue::VecQueue;
+    pub use deque_scoped_queue::DequeScopedQueue;
 });
 
-pub mod heapless_log;
-// `HeaplessLog` is alloc-free (fixed inline array), so it is available everywhere.
-pub use heapless_log::HeaplessLog;
+pub mod array_scoped_stack;
+// `ArrayScopedStack` is alloc-free (fixed inline array), so it is available everywhere.
+pub use array_scoped_stack::ArrayScopedStack;

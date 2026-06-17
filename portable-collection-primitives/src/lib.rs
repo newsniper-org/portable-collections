@@ -355,7 +355,7 @@ macro_rules! wrap_into_map_traits {
             Q: $($( $qb )+ +)? ?Sized,
             V$(: $( $vb )+)?
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::MapShim<K, Q, V> for $map<K, V $($(, $extra)+)?> {
+        > $crate::primitives::MapShim<K, Q, V> for $map<K, V $($(, $extra)+)?> {
             #[inline] fn get(&self, key: &Q) -> Option<&V> { $map::get(self, key) }
             #[inline] fn get_mut(&mut self, key: &Q) -> Option<&mut V> { $map::get_mut(self, key) }
             #[inline] fn remove(&mut self, key: &Q) -> Option<V> { $map::remove(self, key) }
@@ -367,13 +367,13 @@ macro_rules! wrap_into_map_traits {
             K$(: $( $kb )+)?,
             V$(: $( $vb )+)?
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::Map<K, V> for $map<K, V $($(, $extra)+)?> { }
+        > $crate::primitives::Map<K, V> for $map<K, V $($(, $extra)+)?> { }
 
         impl <
             K$(: $( $kb )+)?,
             V$(: $( $vb )+)?
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::Container for $map<K, V $($(, $extra)+)?> {
+        > $crate::primitives::Container for $map<K, V $($(, $extra)+)?> {
             #[inline] fn clear(&mut self) { $map::clear(self); }
             #[inline] fn len(&self) -> usize { $map::len(self) }
             #[inline] fn is_empty(&self) -> bool { $map::is_empty(self) }
@@ -394,7 +394,7 @@ macro_rules! wrap_into_set_traits {
             T: $($( $tb )+ +)? ::core::borrow::Borrow<Q>,
             Q: $($( $qb )+ +)? ?Sized
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::SetShim<T, Q> for $set<T $($(, $extra)+)?> {
+        > $crate::primitives::SetShim<T, Q> for $set<T $($(, $extra)+)?> {
             type Union<'a> = $ut<'a, T $($(, $ug)+)?> where Self: 'a;
             #[inline] fn get(&self, value: &Q) -> Option<&T> { $set::get(self, value) }
             #[inline] fn remove(&mut self, value: &Q) -> bool { $set::remove(self, value) }
@@ -411,12 +411,12 @@ macro_rules! wrap_into_set_traits {
         impl <
             T$(: $( $tb )+)?
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::Set<T> for $set<T $($(, $extra)+)?> { }
+        > $crate::primitives::Set<T> for $set<T $($(, $extra)+)?> { }
 
         impl <
             T$(: $( $tb )+)?
             $($(, $extra $( : $( $sb )+ )? )+)?
-        > crate::primitives::Container for $set<T $($(, $extra)+)?> {
+        > $crate::primitives::Container for $set<T $($(, $extra)+)?> {
             #[inline] fn clear(&mut self) { $set::clear(self); }
             #[inline] fn len(&self) -> usize { $set::len(self) }
             #[inline] fn is_empty(&self) -> bool { $set::is_empty(self) }

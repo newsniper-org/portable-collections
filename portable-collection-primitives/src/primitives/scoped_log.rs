@@ -2,8 +2,9 @@
 //! undo-ledger companions of [`Bimap`](super::Bimap) for the *primary-store ↔
 //! undo-ledger* desync (a clause DB and its per-scope drop list; an SMT trail).
 //!
-//! Only the traits live here; concrete implementations (`VecLog`, the planned
-//! bare-no_std `HeaplessLog`, …) live in the `portable-queues` crate.
+//! Only the traits live here; concrete implementations (`VecScopedStack`, the
+//! bare-no_std `ArrayScopedStack`, `DequeScopedQueue`, …) live in the
+//! `portable-queues` crate.
 
 use super::{Pop, Pull, Push};
 

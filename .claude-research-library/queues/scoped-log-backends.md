@@ -1,8 +1,16 @@
 # ScopedLog backends — comparison & decision
 
 A study of *additional* `ScopedLog<T>` implementations for `portable-queues`,
-measured against the existing `VecLog` baseline. Generated 2026-06-17 from a
+measured against the existing `VecScopedStack` baseline. Generated 2026-06-17 from a
 4-candidate analysis grounded in the queue research library.
+
+> **Naming note.** Written before the trait split + impl rename, so the older
+> vocabulary persists below. The trait `ScopedLog<T>` has since become
+> [`ScopedStack<T>`] (LIFO) + [`ScopedQueue<T>`] (FIFO), and the shipped impls are
+> `VecScopedStack` / `ArrayScopedStack` / `DequeScopedQueue` (the impl-name
+> references already updated). The candidate names below — `ChunkedLog`,
+> `PersistentLog`, `RingLog` — are *hypothetical* backends from this analysis (never
+> implemented), kept verbatim as the study recorded them.
 
 ## 1. Purpose & scope
 
@@ -23,11 +31,11 @@ never branched or catenated.
 
 ## 3. Feature tiers
 
-`bare no_std` (no alloc) · `alloc` · `std`. **`VecLog` is `ifstdoralloc!`-gated
+`bare no_std` (no alloc) · `alloc` · `std`. **`VecScopedStack` is `ifstdoralloc!`-gated
 (needs `alloc::Vec`), so the bare no_std tier currently has *zero* `ScopedLog`
 impls.** That gap is the only thing the heap-tier baseline cannot fill itself.
 
-## 4. Baseline: `VecLog`
+## 4. Baseline: `VecScopedStack`
 
 `push` = amortized O(1) pointer-bump (infallible); `drain_since` = a single
 `Vec::drain(from..).rev()` bulk move; `Mark = Checkpoint(usize)`; contiguous,
@@ -36,26 +44,26 @@ near-optimal for this workload.
 
 ## 5. Comparison
 
-| Backend | `push` | `drain_since` | Memory | Tier | Beats `VecLog` when |
+| Backend | `push` | `drain_since` | Memory | Tier | Beats `VecScopedStack` when |
 |---|---|---|---|---|---|
-| **VecLog** *(baseline)* | amortized O(1) bump | one `Vec::drain.rev()` | unbounded, contiguous, reclaimed on pop | alloc | — (wins on every heap tier) |
+| **VecScopedStack** *(baseline)* | amortized O(1) bump | one `Vec::drain.rev()` | unbounded, contiguous, reclaimed on pop | alloc | — (wins on every heap tier) |
 | ChunkedLog | O(1), worse constant | O(k) per-elem + spine | unbounded, more overhead, no `as_slice` | alloc | only with a live `&T` held across `push` — **no caller** |
 | PersistentLog | O(1) but alloc+refcount **per push** (~10–50×) | O(k) yield + O(1) revert | worse; pins a spine per open scope | alloc | only retain/branch/replay multiple versions — **never used** |
-| HeaplessLog | O(1) **true** worst-case | O(k) `Option::take` | **bounded, static, no alloc** | **bare no_std** | only on a no-allocator target — **fills the one tier gap** |
+| ArrayScopedStack | O(1) **true** worst-case | O(k) `Option::take` | **bounded, static, no alloc** | **bare no_std** | only on a no-allocator target — **fills the one tier gap** |
 | RingLog | O(1) but no sound full-policy | O(k) modular, only if no overwrite | bounded only nominally | bare (contract unhonorable) | **never** — category error |
 
 ## 6. Candidate verdicts
 
 - **ChunkedLog — skip.** Its one edge (pointer/reference stability across pushes)
   has no consumer: the trail holds `usize` marks, and the borrow checker forbids
-  holding `&T` across a `push`. Adds no tier; strictly more overhead than `VecLog`.
+  holding `&T` across a `push`. Adds no tier; strictly more overhead than `VecScopedStack`.
 - **PersistentLog — skip.** O(1) silent `rollback_to` + structural sharing serve
   branch/retain/time-travel use-cases the strictly-LIFO discard-on-pop trail never
   exercises, while regressing the hot `push` with a per-element alloc+refcount and
   pinning a historical spine per open scope. Still needs `alloc` (fills no gap),
   and `Rc` is `Clone` not `Copy` (fights `Mark: Copy`). The catenable-deque paper
   (`2505.07681` §1.2) itself concedes compelling applications are thin.
-- **HeaplessLog — defer.** A fixed inline `[Option<T>; N] + len`; `Mark` stays
+- **ArrayScopedStack — defer.** A fixed inline `[Option<T>; N] + len`; `Mark` stays
   `Checkpoint(usize)`. The **only** candidate that compiles in bare no_std, so the
   sole way to give that tier *any* `ScopedLog`. Build behind a `heapless` feature
   ONLY when a real no-allocator consumer with a known static bound appears.
@@ -65,10 +73,10 @@ near-optimal for this workload.
 
 ## 7. The infallible-`push` vs fixed-capacity tension
 
-`Push::push` is infallible, so a fixed-capacity backend (HeaplessLog) can only
+`Push::push` is infallible, so a fixed-capacity backend (ArrayScopedStack) can only
 **panic on full** — re-creating the surprise-panic failure mode this workspace
 was extracted to eliminate. The clean remedy is a fallible `try_push -> Result<(),
-CapacityError>` (a `HeaplessLog` inherent method, or a trait extension) so a full
+CapacityError>` (a `ArrayScopedStack` inherent method, or a trait extension) so a full
 buffer is a recoverable error, never a panic. Non-overwriting; fail loudly.
 
 ## 8. Reference grounding
@@ -82,10 +90,10 @@ buffer is a recoverable error, never a panic. Non-overwriting; fail loudly.
 
 ## 9. Decision & roadmap
 
-1. **Keep `VecLog` as the sole heap-tier `ScopedLog` impl.** It is correct and
+1. **Keep `VecScopedStack` as the sole heap-tier `ScopedLog` impl.** It is correct and
    optimal; adding a heap backend would be net-negative (more code, worse
    constants, no consumer).
-2. **`HeaplessLog` deferred** behind a `heapless` feature, pending a real
+2. **`ArrayScopedStack` deferred** behind a `heapless` feature, pending a real
    bare-no_std consumer; ship with a fallible `try_push`.
 3. **Ring buffers belong elsewhere** — as a separate honest bounded **FIFO/deque**
    type (a `Pull`-based queue with explicit `push`/`pull` and a documented
@@ -95,10 +103,10 @@ buffer is a recoverable error, never a panic. Non-overwriting; fail loudly.
 ## 10. Open questions (for the user)
 
 1. Any planned **bare-no_std / no-allocator** consumer of `ScopedLog` (firmware /
-   MCU / pre-heap stage)? If not, `HeaplessLog` drops off the roadmap and `VecLog`
+   MCU / pre-heap stage)? If not, `ArrayScopedStack` drops off the roadmap and `VecScopedStack`
    is the final `ScopedLog` answer.
 2. If a bare-tier consumer is real: extend the trait with a fallible `try_push`, or
-   keep `push` infallible and add an inherent `try_push` on `HeaplessLog` only?
+   keep `push` infallible and add an inherent `try_push` on `ArrayScopedStack` only?
    (Decides whether a `CapacityError` lands in primitives.)
 3. Plan a **bounded ring buffer as a separate `Pull`-based FIFO/deque** in
    `portable-queues` (independent of `ScopedLog`)? The ring concept is rejected as

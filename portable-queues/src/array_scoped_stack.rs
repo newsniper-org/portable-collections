@@ -1,5 +1,5 @@
-//! [`HeaplessLog`] — a bare-`no_std`, no-allocator [`ScopedStack`] over a fixed
-//! inline array. The one `ScopedStack` impl that compiles without `alloc`.
+//! [`ArrayScopedStack`] — a bare-`no_std`, no-allocator [`ScopedStack`] over a
+//! fixed inline array. The one `ScopedStack` impl that compiles without `alloc`.
 
 use portable_collection_primitives::{
     Checkpoint, Container, Pop, Push, ScopedRollback, ScopedStack, TryPush,
@@ -11,17 +11,17 @@ use portable_collection_primitives::{
 /// pre-heap kernel/bootloader stage, a const arena).
 ///
 /// `Mark` stays [`Checkpoint`] (a `usize`), so it nests with the same scope
-/// stack as `VecLog`. The capacity `N` is a hard ceiling: [`push`](Push::push)
-/// **panics** on overflow (the infallible [`Push`] contract leaves no other
-/// option), so prefer [`try_push`](TryPush::try_push) whenever the bound is not
-/// statically guaranteed.
+/// stack as `VecScopedStack`. The capacity `N` is a hard ceiling:
+/// [`push`](Push::push) **panics** on overflow (the infallible [`Push`] contract
+/// leaves no other option), so prefer [`try_push`](TryPush::try_push) whenever the
+/// bound is not statically guaranteed.
 #[derive(Clone, Debug)]
-pub struct HeaplessLog<T, const N: usize> {
+pub struct ArrayScopedStack<T, const N: usize> {
     items: [Option<T>; N],
     len: usize,
 }
 
-impl<T, const N: usize> HeaplessLog<T, N> {
+impl<T, const N: usize> ArrayScopedStack<T, N> {
     /// Create an empty log.
     #[must_use]
     pub fn new() -> Self {
@@ -44,13 +44,13 @@ impl<T, const N: usize> HeaplessLog<T, N> {
     }
 }
 
-impl<T, const N: usize> Default for HeaplessLog<T, N> {
+impl<T, const N: usize> Default for ArrayScopedStack<T, N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, const N: usize> Container for HeaplessLog<T, N> {
+impl<T, const N: usize> Container for ArrayScopedStack<T, N> {
     fn clear(&mut self) {
         for slot in &mut self.items[..self.len] {
             *slot = None;
@@ -62,17 +62,17 @@ impl<T, const N: usize> Container for HeaplessLog<T, N> {
     }
 }
 
-impl<T, const N: usize> Push<T> for HeaplessLog<T, N> {
+impl<T, const N: usize> Push<T> for ArrayScopedStack<T, N> {
     /// Append `item`. **Panics** if the log is full (`len == N`); use
     /// [`try_push`](TryPush::try_push) to handle the full case as a value.
     fn push(&mut self, item: T) {
-        assert!(self.len < N, "HeaplessLog overflow: capacity {N} exceeded");
+        assert!(self.len < N, "ArrayScopedStack overflow: capacity {N} exceeded");
         self.items[self.len] = Some(item);
         self.len += 1;
     }
 }
 
-impl<T, const N: usize> TryPush<T> for HeaplessLog<T, N> {
+impl<T, const N: usize> TryPush<T> for ArrayScopedStack<T, N> {
     /// Append `item` if there is room; return `false` (inserting nothing) when full.
     fn try_push(&mut self, item: T) -> bool {
         if self.len == N {
@@ -84,7 +84,7 @@ impl<T, const N: usize> TryPush<T> for HeaplessLog<T, N> {
     }
 }
 
-impl<T, const N: usize> Pop<T> for HeaplessLog<T, N> {
+impl<T, const N: usize> Pop<T> for ArrayScopedStack<T, N> {
     fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -97,7 +97,7 @@ impl<T, const N: usize> Pop<T> for HeaplessLog<T, N> {
     }
 }
 
-impl<T, const N: usize> ScopedRollback for HeaplessLog<T, N> {
+impl<T, const N: usize> ScopedRollback for ArrayScopedStack<T, N> {
     type Mark = Checkpoint;
 
     fn checkpoint(&self) -> Checkpoint {
@@ -113,7 +113,7 @@ impl<T, const N: usize> ScopedRollback for HeaplessLog<T, N> {
     }
 }
 
-impl<T, const N: usize> ScopedStack<T> for HeaplessLog<T, N> {
+impl<T, const N: usize> ScopedStack<T> for ArrayScopedStack<T, N> {
     fn drain_since(&mut self, mark: Checkpoint) -> impl Iterator<Item = T> + '_ {
         let to = mark.as_len().min(self.len);
         let mut cur = self.len; // old top
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn push_pop_last_len() {
-        let mut log: HeaplessLog<u32, 4> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 4> = ArrayScopedStack::new();
         log.push(10);
         log.push(20);
         assert_eq!(log.last(), Some(&20));
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn try_push_fails_when_full_without_panic() {
-        let mut log: HeaplessLog<u32, 2> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 2> = ArrayScopedStack::new();
         assert!(log.try_push(1));
         assert!(log.try_push(2));
         assert!(log.is_full());
@@ -163,14 +163,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "overflow")]
     fn push_panics_when_full() {
-        let mut log: HeaplessLog<u32, 1> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 1> = ArrayScopedStack::new();
         log.push(1);
         log.push(2); // infallible push has no room → panic
     }
 
     #[test]
     fn drain_since_yields_lifo_and_truncates() {
-        let mut log: HeaplessLog<u32, 8> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 8> = ArrayScopedStack::new();
         log.push(1);
         let mark = ScopedRollback::checkpoint(&log);
         log.push(2);
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn rollback_to_is_the_silent_twin() {
-        let mut log: HeaplessLog<u32, 8> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 8> = ArrayScopedStack::new();
         log.push(1);
         let mark = ScopedRollback::checkpoint(&log);
         log.push(2);
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn drain_since_overshoot_is_empty_noop() {
-        let mut log: HeaplessLog<u32, 4> = HeaplessLog::new();
+        let mut log: ArrayScopedStack<u32, 4> = ArrayScopedStack::new();
         log.push(1);
         let big = Checkpoint::from_len(99);
         let drained: Vec<u32> = log.drain_since(big).collect();
