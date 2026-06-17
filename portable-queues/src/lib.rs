@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
-use portable_collection_primitives::{ifstd};
+use portable_collection_primitives::{ifstd, ifstdoralloc};
 
 ifstd!({
     #[allow(unused_imports)]
@@ -14,3 +14,13 @@ ifstd!({
         use core::fmt;
     });
 });
+
+pub mod vec_log;
+// `VecLog` needs `Vec` (alloc), so re-export it only on the alloc/std tiers.
+ifstdoralloc!({
+    pub use vec_log::VecLog;
+});
+
+pub mod heapless_log;
+// `HeaplessLog` is alloc-free (fixed inline array), so it is available everywhere.
+pub use heapless_log::HeaplessLog;

@@ -4,6 +4,11 @@ mod checkpointing;
 pub use checkpointing::{Checkpoint, ScopedRollback};
 mod bijection;
 pub use bijection::Bimap;
+mod scoped_log;
+pub use scoped_log::{ScopedStack, ScopedQueue};
+
+mod queue;
+pub use queue::{Push, TryPush, Pop, Pull};
 
 ifstdoralloc!({
     // `core::borrow::Borrow` is also reachable as `std::borrow::Borrow`; living
@@ -123,5 +128,4 @@ ifstdoralloc!({
         fn replace(&mut self, value: T) -> Option<T>;
         fn take(&mut self, value: &Q) -> Option<T>;
     }
-    
 });

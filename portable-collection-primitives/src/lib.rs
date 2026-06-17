@@ -426,7 +426,7 @@ macro_rules! wrap_into_set_traits {
 
 
 pub mod primitives;
-pub use primitives::{Checkpoint, ScopedRollback, Bimap, Container};
+pub use primitives::{Checkpoint, ScopedRollback, Bimap, Container, ScopedStack, ScopedQueue, Push, TryPush, Pop, Pull};
 // The Map/Set facade lives behind `ifstdoralloc!`, so re-export it only on the
 // tiers where it exists (alloc or std) — a bare-no_std re-export would be an
 // unresolved import. (`Container` is heap-free, so it is re-exported above.)
