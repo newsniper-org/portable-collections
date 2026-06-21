@@ -136,6 +136,9 @@ RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=2 cargo test --release --test loom_w
 - **storage** = the wait-free radix map (`waitfree.rs`);
 - **snapshots** = in-key snapshot ids + a lock-free ancestry registry; reads
   resolve the visible ancestor version (snapshot-consistent, not live-linearizable);
+  **O(1) lock-free `delete_snapshot`** (mark-dead → versions invisible at once) +
+  **GC via a per-snapshot dirty-set** (reclaims a dead snapshot's keys ∝ what it
+  wrote, not the whole fs — fixes the O(1)-create / O(scan)-delete asymmetry);
 - **durability** = a **lock-free per-core journal** (per-thread Treiber log, no
   lock on append); recovery replays the merged, seq-ordered log; the DRAM index
   is authoritative, durability is the separate journal (the move that dissolves

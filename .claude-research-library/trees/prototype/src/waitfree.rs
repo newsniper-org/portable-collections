@@ -111,6 +111,45 @@ fn insert_copy(node: &Node, suffix: &[u8], seq: u64, value: &Value) -> Option<No
     }
 }
 
+/// Path-copy a node with `key` removed; prunes children that become empty.
+/// Returns the new node and whether a value was actually present.
+fn remove_copy(node: &Node, key: &[u8]) -> (Node, bool) {
+    match key.split_first() {
+        None => {
+            let present = node.entry.is_some();
+            (
+                Node {
+                    children: node.children.clone(),
+                    entry: None,
+                },
+                present,
+            )
+        }
+        Some((b, rest)) => {
+            let mut children = node.children.clone();
+            let removed = match children.binary_search_by_key(b, |(c, _)| *c) {
+                Ok(i) => {
+                    let (nc, did) = remove_copy(&children[i].1, rest);
+                    if nc.children.is_empty() && nc.entry.is_none() {
+                        children.remove(i); // prune emptied subtree
+                    } else {
+                        children[i] = (*b, Arc::new(nc));
+                    }
+                    did
+                }
+                Err(_) => false,
+            };
+            (
+                Node {
+                    children,
+                    entry: node.entry.clone(),
+                },
+                removed,
+            )
+        }
+    }
+}
+
 fn get_node<'a>(mut node: &'a Node, key: &[u8]) -> Option<&'a Value> {
     for &b in key {
         match node.children.binary_search_by_key(&b, |(c, _)| *c) {
@@ -309,6 +348,21 @@ impl WaitFreeRadixMap {
                 d.done.store(true, Ordering::Release);
             }
         }
+    }
+
+    /// Lock-free physical removal of a key (CoW path-copy, prunes emptied
+    /// nodes). Used by snapshot GC to reclaim a dead snapshot's versions; not on
+    /// the hot path, so lock-free (rcu) rather than wait-free. Returns whether a
+    /// value was present.
+    pub fn remove(&self, key: &[u8; KEY_LEN]) -> bool {
+        let s = &self.shards[self.shard_of(key)];
+        let mut removed = false;
+        s.root.rcu(|cur| {
+            let (n, did) = remove_copy(cur, key);
+            removed = did;
+            Arc::new(n)
+        });
+        removed
     }
 
     /// Wait-free point read.

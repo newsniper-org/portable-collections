@@ -10,7 +10,9 @@
 //!   map (immutable walk) + a wait-free snapshot-ancestry resolve;
 //! * writes (`put` / `delete`) are **wait-free** (the map) + a **lock-free
 //!   per-core** journal append (Treiber push, no lock);
-//! * `create_snapshot` is **lock-free** (one `fetch_add` + releases);
+//! * `create_snapshot` and `delete_snapshot` are **lock-free** (O(1): a
+//!   `fetch_add` / a dead-flag store); GC reclaims a dead snapshot's versions
+//!   using only its per-snapshot dirty-set (∝ what it wrote, not the whole fs);
 //! * recovery (`recover`) replays the merged journal single-threaded.
 //!
 //! One op-sequence (`seq_gen`) drives both the map's monotone apply and the
@@ -24,7 +26,7 @@
 //! per-core Treiber log (the in-memory shape of a real FS's lock-free per-core
 //! on-disk log). Neither is on the wait-free read path.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -80,11 +82,14 @@ impl PerCoreJournal {
     }
 }
 
-/// Lock-free, fixed-capacity snapshot tree (parent + depth per id). Snapshots
-/// are never deleted in this prototype, so the registry only grows.
+/// Lock-free, fixed-capacity snapshot tree (parent + depth + dead-flag per id).
+/// Deletion is O(1) (set the dead flag; versions go invisible at once); ids are
+/// never reused, and a dead snapshot's keys are physically reclaimed by GC via
+/// the per-snapshot dirty-set.
 pub struct ConcSnapshots {
     parent: Vec<AtomicU32>,
     depth: Vec<AtomicU32>,
+    dead: Vec<AtomicBool>,
     next: AtomicU32,
 }
 
@@ -93,12 +98,26 @@ impl ConcSnapshots {
         assert!(cap >= 2, "need room for sentinel + root");
         let parent = (0..cap).map(|_| AtomicU32::new(0)).collect();
         let depth = (0..cap).map(|_| AtomicU32::new(0)).collect();
+        let dead = (0..cap).map(|_| AtomicBool::new(false)).collect();
         // index 0 = sentinel, index 1 = root (parent 0, depth 0).
         ConcSnapshots {
             parent,
             depth,
+            dead,
             next: AtomicU32::new(2),
         }
+    }
+
+    /// Mark a snapshot deleted — O(1), lock-free. Its versions become invisible
+    /// immediately (resolve skips dead snapshots); physical reclamation is done
+    /// later by GC using the per-snapshot dirty-set.
+    pub fn mark_dead(&self, id: SnapId) {
+        self.dead[id as usize].store(true, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn is_dead(&self, id: SnapId) -> bool {
+        self.dead[id as usize].load(Ordering::Acquire)
     }
 
     #[inline]
@@ -159,7 +178,9 @@ impl ConcSnapshots {
 fn resolve(candidates: &[(SnapId, Value)], read: SnapId, snaps: &ConcSnapshots) -> Option<Value> {
     let mut best: Option<(u32, &Value)> = None;
     for (w, v) in candidates {
-        if snaps.is_ancestor_or_eq(*w, read) {
+        // A version written in a deleted snapshot is invisible; a read then
+        // resolves to the nearest live ancestor's version.
+        if !snaps.is_dead(*w) && snaps.is_ancestor_or_eq(*w, read) {
             let d = snaps.depth(*w);
             if best.is_none_or(|(bd, _)| d > bd) {
                 best = Some((d, v));
@@ -187,14 +208,27 @@ pub enum ConcOp {
         child: SnapId,
         seq: u64,
     },
+    DeleteSnap {
+        snap: SnapId,
+        seq: u64,
+    },
 }
 
 impl ConcOp {
     fn seq(&self) -> u64 {
         match self {
-            ConcOp::Put { seq, .. } | ConcOp::Snap { seq, .. } => *seq,
+            ConcOp::Put { seq, .. } | ConcOp::Snap { seq, .. } | ConcOp::DeleteSnap { seq, .. } => *seq,
         }
     }
+}
+
+/// Per-snapshot dirty-set: a lock-free Treiber stack of the `(inode, offset)`
+/// keys written *in* a snapshot, so GC of a dead snapshot scans only its own
+/// dirty-set (∝ what it wrote) instead of the whole filesystem.
+struct DirtyNode {
+    inode: Inode,
+    offset: Offset,
+    next: Option<Arc<DirtyNode>>,
 }
 
 /// The full concurrent filesystem core: wait-free map + snapshots + journal.
@@ -202,6 +236,8 @@ pub struct ConcFs {
     map: WaitFreeRadixMap,
     snaps: ConcSnapshots,
     journal: PerCoreJournal,
+    /// Per-snapshot dirty-set, indexed by snapshot id (lock-free Treiber stacks).
+    dirty: Vec<ArcSwapOption<DirtyNode>>,
     seq_gen: AtomicU64,
     max_threads: usize,
 }
@@ -216,6 +252,7 @@ impl ConcFs {
             map: WaitFreeRadixMap::new_with_prefix(shards, max_threads, 8),
             snaps: ConcSnapshots::new(snap_cap),
             journal: PerCoreJournal::new(max_threads),
+            dirty: (0..snap_cap).map(|_| ArcSwapOption::empty()).collect(),
             seq_gen: AtomicU64::new(1),
             max_threads,
         }
@@ -234,6 +271,47 @@ impl ConcFs {
         let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
         self.map.put_with_seq(tid, &encode(inode, offset, snap), value.clone(), seq);
         self.journal.append(tid, ConcOp::Put { inode, offset, snap, value, seq });
+        self.record_dirty(snap, inode, offset);
+    }
+
+    fn record_dirty(&self, snap: SnapId, inode: Inode, offset: Offset) {
+        self.dirty[snap as usize].rcu(|cur| {
+            Some(Arc::new(DirtyNode {
+                inode,
+                offset,
+                next: cur.clone(),
+            }))
+        });
+    }
+
+    /// Delete a snapshot — O(1), lock-free. Its versions become invisible at
+    /// once (reads resolve to the nearest live ancestor); physical space is
+    /// reclaimed later by [`ConcFs::gc_snapshot`] using the dirty-set.
+    pub fn delete_snapshot(&self, tid: usize, snap: SnapId) {
+        let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
+        self.snaps.mark_dead(snap);
+        self.journal.append(tid, ConcOp::DeleteSnap { snap, seq });
+    }
+
+    /// Reclaim a dead snapshot's versions using ONLY its per-snapshot dirty-set
+    /// (cost ∝ what that snapshot wrote, not the whole filesystem — the fix for
+    /// the O(1)-create / O(scan)-delete asymmetry). Returns keys removed.
+    pub fn gc_snapshot(&self, snap: SnapId) -> usize {
+        debug_assert!(self.snaps.is_dead(snap), "gc_snapshot: snapshot must be deleted first");
+        let mut removed = 0;
+        let mut cur = self.dirty[snap as usize].load_full();
+        while let Some(node) = cur {
+            if self.map.remove(&encode(node.inode, node.offset, snap)) {
+                removed += 1;
+            }
+            cur = node.next.clone();
+        }
+        self.dirty[snap as usize].store(None);
+        removed
+    }
+
+    pub fn is_snapshot_dead(&self, snap: SnapId) -> bool {
+        self.snaps.is_dead(snap)
     }
 
     /// Snapshot-scoped delete (tombstone).
@@ -305,8 +383,10 @@ impl ConcFs {
         for op in ops {
             match op {
                 ConcOp::Snap { parent, child, .. } => fs.snaps.set_child(*parent, *child),
+                ConcOp::DeleteSnap { snap, .. } => fs.snaps.mark_dead(*snap),
                 ConcOp::Put { inode, offset, snap, value, seq } => {
                     fs.map.put_with_seq(0, &encode(*inode, *offset, *snap), value.clone(), *seq);
+                    fs.record_dirty(*snap, *inode, *offset);
                 }
             }
         }
@@ -355,6 +435,46 @@ mod tests {
         assert_eq!(at_root, vec![1, 3, 5, 7, 9]);
         let at_child: Vec<u64> = fs.range(1, 0, 100, child).into_iter().map(|(o, _)| o).collect();
         assert_eq!(at_child, vec![1, 3, 4, 7, 9]);
+    }
+
+    #[test]
+    fn snapshot_delete_and_gc() {
+        let fs = ConcFs::new(8, 2, 1024);
+        let root = fs.root_snapshot();
+        fs.put(0, 1, 0, root, Value::Inode(10));
+        let child = fs.create_snapshot(0, root);
+        fs.put(0, 1, 0, child, Value::Inode(20)); // override in child
+        fs.put(0, 2, 0, child, Value::Inode(99)); // child-only key
+        assert_eq!(fs.get(1, 0, child), Some(Value::Inode(20)));
+        assert_eq!(fs.get(2, 0, child), Some(Value::Inode(99)));
+
+        // O(1) delete: child's versions become invisible at once.
+        fs.delete_snapshot(0, child);
+        assert_eq!(fs.get(1, 0, child), Some(Value::Inode(10))); // falls back to root
+        assert_eq!(fs.get(2, 0, child), None); // child-only key gone from view
+        assert_eq!(fs.get(1, 0, root), Some(Value::Inode(10))); // root unaffected
+
+        // GC reclaims exactly the child's two keys (∝ its dirty-set), nothing else.
+        assert_eq!(fs.gc_snapshot(child), 2);
+        // visible state unchanged after physical reclamation
+        assert_eq!(fs.get(1, 0, child), Some(Value::Inode(10)));
+        assert_eq!(fs.get(2, 0, child), None);
+        assert_eq!(fs.get(1, 0, root), Some(Value::Inode(10)));
+    }
+
+    #[test]
+    fn recover_preserves_deletion() {
+        let fs = ConcFs::new(8, 2, 1024);
+        let root = fs.root_snapshot();
+        fs.put(0, 1, 0, root, Value::Inode(10));
+        let c = fs.create_snapshot(0, root);
+        fs.put(0, 1, 0, c, Value::Inode(20));
+        fs.delete_snapshot(0, c);
+        let ops = fs.drained_ops();
+        let rec = ConcFs::recover(&ops, 8, 2, 1024);
+        assert!(rec.is_snapshot_dead(c));
+        assert_eq!(rec.get(1, 0, c), Some(Value::Inode(10))); // deletion survives recovery
+        assert_eq!(fs.get(1, 0, c), rec.get(1, 0, c));
     }
 
     #[test]
