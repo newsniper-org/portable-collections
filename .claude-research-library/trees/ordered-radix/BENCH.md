@@ -54,3 +54,54 @@ Why the radix loses on raw ops *as built*:
 concurrency + verifiability, not raw ops. Recommend an **ART CoW variant** as the
 deciding experiment before committing the on-disk backbone; the naive map here is
 the correctness/concurrency reference, not the performance candidate.
+
+---
+
+# ART-CoW results — backbone decision closed
+
+`cargo run --release --bin bench` (16-core box, single-thread, single-run
+indicative; same 256k-key FS workload). Adds the path-compressed **Adaptive
+Radix Tree** (`ArtCowMap`) as the real radix candidate.
+
+| operation | ART-CoW | naive-radix | std::BTreeMap |
+|---|--:|--:|--:|
+| insert | 0.89 M/s | 0.65 M/s | 7.42 M/s |
+| lookup | **3.89 M/s** | 0.88 M/s | 4.07 M/s |
+| dir-range (listing) | 0.135 M dir/s | 0.037 M dir/s | 1.985 M dir/s |
+| snapshot (per op) | **2.4 ns (O(1))** | 2.5 ns | 7.9 ms |
+
+ART metrics (the constraint criteria):
+| | ART-CoW | naive-radix |
+|---|--:|--:|
+| nodes/key | **1.12** | 9.90 |
+| bytes/key (approx) | 88.7 | — |
+| depth (node-hops) | **max 6, avg 4.22** | 18 (fixed) |
+| node types | N4=26 791 · N16=7 · N48=21 · N256=3 995 | — |
+
+## Reading (decision input)
+
+- **Lookup gap CLOSED**: 0.88 → 3.89 M/s = **~0.96× of BTreeMap**. Path
+  compression + adaptive wide nodes make radix lookups competitive.
+- **Memory 8.8× better**: 9.9 → **1.12 nodes/key** — directly helps on-disk size
+  and firmware RAM.
+- **Depth nailed**: **max 6 / avg 4.22** node-hops (vs naive 18; under the ~10
+  target) — the bounded-latency criterion holds. The shape is as predicted:
+  the inode prefix compresses, then a wide **N256** node per directory carries
+  the ~64-way `h64` fan-out (3 995 N256 ≈ one per dir), N4 below.
+- **Snapshot stays O(1)**: 2.4 ns Arc-clone, no regression — the reason to use
+  radix is preserved.
+- **Remaining weak spots**: (1) **insert** 0.89 vs 7.42 M/s — the CoW path-copy +
+  node-clone cost (inherent to persistence; vs a *CoW* B+tree it would be
+  comparable, not 8×). (2) **dir-range** still ~15× behind BTreeMap, because
+  hashed `h64` dirents are scattered with no shared prefix — but the absolute
+  cost is ~7 µs to list a 64-entry directory, acceptable for dir enumeration.
+
+## Verdict
+
+ART-CoW makes **radix a viable on-disk backbone**: competitive lookups, far less
+memory, bounded shallow depth, and O(1) snapshots — the combination a comparison
+B-tree cannot match (no cheap snapshot) and the naive radix could not deliver on
+raw ops. The open trade is insert throughput (CoW cost, comparable to a CoW
+B+tree) and dir-listing (intrinsic to hashed keys). Recommend radix(ART) as the
+backbone candidate subject to the on-disk node-encoding / firmware-parsability
+work (A3-3) being designed in from the start.

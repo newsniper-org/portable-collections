@@ -26,9 +26,11 @@
 
 extern crate alloc;
 
+mod art;
 mod cow;
 pub mod traits;
 
+pub use art::ArtCowMap;
 pub use cow::CowRadixMap;
 pub use traits::{OrderedMap, SnapshotMap};
 

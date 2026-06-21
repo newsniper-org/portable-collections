@@ -1,24 +1,21 @@
-//! First-cut benchmark: `ordered-radix` (CoW persistent) vs `std::BTreeMap`
-//! (the in-memory comparison-B-tree baseline) on an **FS-shaped metadata
-//! workload** — the reply's request to "decide the backbone with numbers".
+//! Backbone-decision benchmark (filesystem-researches greenlight criteria):
+//! **ART-CoW vs naive-radix vs `std::BTreeMap`** on an FS metadata workload,
+//! measuring not just throughput but the constraints that close the decision:
+//! memory (nodes/key + bytes/key), depth (max & avg — bounded-latency), the
+//! separate dir-listing (range) cost, and that the CoW O(1) snapshot survives.
 //!
-//! Keys are `(dir_inode: u64, h64: u64, cd: u16)` = 18 bytes big-endian, the
-//! shape filesystem-researches uses for dirents (original name is the value).
-//! Workload: bulk insert, dirent point-lookup, per-directory range (listing),
-//! and snapshot — the last being where CoW's O(1) snapshot diverges sharply from
-//! BTreeMap's O(n) clone.
-//!
-//! Honest framing: BTreeMap is a B-tree (B=6), not a CoW B+tree, and has no
-//! cheap snapshot (clone is its only one). This measures radix-vs-comparison-tree
-//! on FS ops + the CoW snapshot advantage. Run: `cargo run --release --bin bench`.
+//! Keys `(dir_inode:u64, h64:u64, cd:u16)` = 18B big-endian; `h64` is a keyed
+//! PRF (random — no shared prefix within a dir), so path-compression only helps
+//! the inode prefix and the `h64` depth must come from adaptive wide nodes.
+//! `cargo run --release --bin bench`.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use ordered_radix::{CowRadixMap, OrderedMap, SnapshotMap};
+use ordered_radix::{ArtCowMap, CowRadixMap, OrderedMap, SnapshotMap};
 
-const DIRS: u64 = 4_000; // directories (inodes)
-const PER_DIR: u64 = 64; // dirents per directory
+const DIRS: u64 = 4_000;
+const PER_DIR: u64 = 64;
 const LOOKUPS: u64 = 1_000_000;
 const RANGES: u64 = 50_000;
 
@@ -34,7 +31,6 @@ impl Rng {
 }
 
 fn fnv(name: u64) -> u64 {
-    // stand-in for keyed name-hash h64
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in name.to_le_bytes() {
         h ^= b as u64;
@@ -51,116 +47,126 @@ fn key(inode: u64, h64: u64, cd: u16) -> [u8; 18] {
     k
 }
 
-fn secs(t: Instant) -> f64 {
+fn s(t: Instant) -> f64 {
     t.elapsed().as_secs_f64()
+}
+fn mops(n: u64, secs: f64) -> f64 {
+    n as f64 / secs / 1e6
 }
 
 fn main() {
-    let total_keys = DIRS * PER_DIR;
-    println!("== ordered-radix (CoW) vs std::BTreeMap — FS metadata workload ==");
-    println!("keys=(dir_inode,h64,cd) 18B; dirs={DIRS} per_dir={PER_DIR} total={total_keys}\n");
+    let total = DIRS * PER_DIR;
+    println!("== backbone bench: ART-CoW vs naive-radix vs std::BTreeMap — FS metadata ==");
+    println!("keys=(dir_inode,h64,cd) 18B; dirs={DIRS} per_dir={PER_DIR} total={total}\n");
 
-    // Precompute the key set (same for both) so we time the maps, not the RNG.
-    let mut keys: Vec<[u8; 18]> = Vec::with_capacity(total_keys as usize);
+    let mut keys: Vec<[u8; 18]> = Vec::with_capacity(total as usize);
     for d in 0..DIRS {
         for e in 0..PER_DIR {
             keys.push(key(d, fnv(d * 1_000_003 + e), 0));
         }
     }
 
-    // ---- bulk insert ----
+    // ---- insert ----
     let t = Instant::now();
     let mut radix: CowRadixMap<u64> = CowRadixMap::new();
     for (i, k) in keys.iter().enumerate() {
         radix.insert(k, i as u64);
     }
-    let r_ins = secs(t);
+    let r_ins = s(t);
+
+    let t = Instant::now();
+    let mut art: ArtCowMap<u64> = ArtCowMap::new();
+    for (i, k) in keys.iter().enumerate() {
+        art.insert(k, i as u64);
+    }
+    let a_ins = s(t);
 
     let t = Instant::now();
     let mut bt: BTreeMap<[u8; 18], u64> = BTreeMap::new();
     for (i, k) in keys.iter().enumerate() {
         bt.insert(*k, i as u64);
     }
-    let b_ins = secs(t);
+    let b_ins = s(t);
 
-    // ---- dirent point lookup ----
-    let mut rng = Rng(1);
-    let t = Instant::now();
+    // ---- lookup ----
     let mut acc = 0u64;
-    for _ in 0..LOOKUPS {
-        let k = &keys[(rng.next() % total_keys) as usize];
-        if let Some(v) = radix.get(k) {
-            acc ^= *v;
+    let timed_lookup = |m: &dyn Fn(&[u8; 18]) -> Option<u64>| -> f64 {
+        let mut rng = Rng(1);
+        let t = Instant::now();
+        for _ in 0..LOOKUPS {
+            if let Some(v) = m(&keys[(rng.next() % total) as usize]) {
+                std::hint::black_box(v);
+            }
         }
-    }
-    let r_get = secs(t);
+        s(t)
+    };
+    let r_get = timed_lookup(&|k| radix.get(k).copied());
+    let a_get = timed_lookup(&|k| art.get(k).copied());
+    let b_get = timed_lookup(&|k| bt.get(k).copied());
 
-    let mut rng = Rng(1);
-    let t = Instant::now();
-    for _ in 0..LOOKUPS {
-        let k = &keys[(rng.next() % total_keys) as usize];
-        if let Some(v) = bt.get(k) {
-            acc ^= *v;
-        }
-    }
-    let b_get = secs(t);
-
-    // ---- per-directory range (listing) ----
-    // Fair count-only comparison: radix uses the non-allocating visitor, BTreeMap
-    // counts its lazy iterator — neither materializes results.
+    // ---- dir range (listing), count-only (fair) ----
+    let mut rc = 0usize;
+    let mut ac = 0usize;
+    let mut bc = 0usize;
     let mut rng = Rng(7);
     let t = Instant::now();
-    let mut rcount = 0usize;
     for _ in 0..RANGES {
         let d = rng.next() % DIRS;
-        let lo = key(d, 0, 0);
-        let hi = key(d, u64::MAX, u16::MAX);
-        radix.for_each_range(&lo, &hi, |_, _| rcount += 1);
+        radix.for_each_range(&key(d, 0, 0), &key(d, u64::MAX, u16::MAX), |_, _| rc += 1);
     }
-    let r_range = secs(t);
-
+    let r_range = s(t);
     let mut rng = Rng(7);
     let t = Instant::now();
-    let mut bcount = 0usize;
     for _ in 0..RANGES {
         let d = rng.next() % DIRS;
-        let lo = key(d, 0, 0);
-        let hi = key(d, u64::MAX, u16::MAX);
-        bcount += bt.range(lo..=hi).count();
+        art.for_each_range(&key(d, 0, 0), &key(d, u64::MAX, u16::MAX), |_, _| ac += 1);
     }
-    let b_range = secs(t);
-    assert_eq!(rcount, bcount, "range results must match");
-
-    // ---- snapshot (the CoW divergence) ----
-    const SNAPS: u64 = 100_000;
+    let a_range = s(t);
+    let mut rng = Rng(7);
     let t = Instant::now();
-    let mut keep = 0usize;
-    for _ in 0..SNAPS {
-        let s = radix.snapshot();
-        keep = keep.wrapping_add(s.len());
+    for _ in 0..RANGES {
+        let d = rng.next() % DIRS;
+        bc += bt.range(key(d, 0, 0)..=key(d, u64::MAX, u16::MAX)).count();
     }
-    let r_snap = secs(t);
+    let b_range = s(t);
+    assert_eq!(rc, ac);
+    assert_eq!(ac, bc);
 
-    // BTreeMap has no cheap snapshot: clone() is the only one (O(n)). Do far
-    // fewer to keep wall-time sane, then normalize per-snapshot.
+    // ---- snapshot ----
+    const SNAPS: u64 = 200_000;
     const BT_SNAPS: u64 = 200;
     let t = Instant::now();
-    for _ in 0..BT_SNAPS {
-        let c = bt.clone();
-        keep = keep.wrapping_add(c.len());
+    for _ in 0..SNAPS {
+        acc = acc.wrapping_add(radix.snapshot().len() as u64);
     }
-    let b_snap_per = secs(t) / BT_SNAPS as f64;
-    let r_snap_per = r_snap / SNAPS as f64;
+    let r_snap = s(t) / SNAPS as f64;
+    let t = Instant::now();
+    for _ in 0..SNAPS {
+        acc = acc.wrapping_add(art.snapshot().len() as u64);
+    }
+    let a_snap = s(t) / SNAPS as f64;
+    let t = Instant::now();
+    for _ in 0..BT_SNAPS {
+        acc = acc.wrapping_add(bt.clone().len() as u64);
+    }
+    let b_snap = s(t) / BT_SNAPS as f64;
 
     // ---- report ----
-    let mops = |n: u64, s: f64| n as f64 / s / 1e6;
-    println!("operation            ordered-radix         std::BTreeMap        radix/bt");
-    println!("-------------------- --------------------- -------------------- --------");
-    println!("bulk insert          {:>7.2} M/s          {:>7.2} M/s          {:>5.2}x", mops(total_keys, r_ins), mops(total_keys, b_ins), b_ins / r_ins);
-    println!("dirent lookup        {:>7.2} M/s          {:>7.2} M/s          {:>5.2}x", mops(LOOKUPS, r_get), mops(LOOKUPS, b_get), b_get / r_get);
-    println!("dir range (listing)  {:>7.2} M dirs/s     {:>7.2} M dirs/s     {:>5.2}x", mops(RANGES, r_range), mops(RANGES, b_range), b_range / r_range);
-    println!("snapshot (per op)    {:>9.1} ns           {:>9.1} ns           {:>7.0}x", r_snap_per * 1e9, b_snap_per * 1e9, b_snap_per / r_snap_per);
-    println!("\nmemory: radix nodes = {} ({:.2} nodes/key)", radix.node_count(), radix.node_count() as f64 / total_keys as f64);
-    println!("(ratio > 1 = ordered-radix faster; snapshot column shows CoW's O(1) vs BTreeMap clone O(n))");
-    std::hint::black_box((acc, keep, rcount));
+    println!("{:<20} {:>14} {:>14} {:>14}", "operation", "ART-CoW", "naive-radix", "BTreeMap");
+    println!("{:-<20} {:->14} {:->14} {:->14}", "", "", "", "");
+    println!("{:<20} {:>11.2} M/s {:>11.2} M/s {:>11.2} M/s", "insert", mops(total, a_ins), mops(total, r_ins), mops(total, b_ins));
+    println!("{:<20} {:>11.2} M/s {:>11.2} M/s {:>11.2} M/s", "lookup", mops(LOOKUPS, a_get), mops(LOOKUPS, r_get), mops(LOOKUPS, b_get));
+    println!("{:<20} {:>9.3} M d/s {:>9.3} M d/s {:>9.3} M d/s", "dir-range(listing)", mops(RANGES, a_range), mops(RANGES, r_range), mops(RANGES, b_range));
+    println!("{:<20} {:>11.1} ns {:>11.1} ns {:>11.1} ns", "snapshot (per op)", a_snap * 1e9, r_snap * 1e9, b_snap * 1e9);
+
+    let (amax, aavg) = art.depth_stats();
+    let h = art.node_type_histogram();
+    println!("\nART metrics (vs naive-radix):");
+    println!("  nodes/key : ART {:.2}   |  naive-radix {:.2}", art.node_count() as f64 / total as f64, radix.node_count() as f64 / total as f64);
+    println!("  bytes/key : ART {:.1}", art.approx_bytes() as f64 / total as f64);
+    println!("  depth     : ART max={amax} avg={aavg:.2} node-hops  (naive-radix = 18, fixed)  [target ~10]");
+    println!("  node types: N4={} N16={} N48={} N256={}", h[0], h[1], h[2], h[3]);
+    println!("  snapshot  : O(1) preserved (Arc-clone, {a_snap:.1e}s)  vs BTreeMap clone O(n)");
+    std::hint::black_box((acc, rc));
+    println!("\n(ratio reading: closer ART throughput is to BTreeMap = gap closed; depth ~10 & nodes/key down = bounded-latency + memory win; snapshot stays O(1).)");
 }
