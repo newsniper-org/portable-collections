@@ -32,6 +32,10 @@ path = "src/bin/simulate.rs"
 name = "stress"
 path = "src/bin/stress.rs"
 
+[[bin]]
+name = "fsdemo"
+path = "src/bin/fsdemo.rs"
+
 [profile.release]
 opt-level = 3
 

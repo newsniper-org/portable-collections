@@ -165,6 +165,14 @@ struct Shard {
 pub struct WaitFreeRadixMap {
     shards: Vec<Shard>,
     max_threads: usize,
+    /// Keys are sharded by their first `shard_prefix` bytes. Sharding by a
+    /// *prefix* (rather than the whole key) keeps every key that shares that
+    /// prefix in ONE shard — so a band/range scan confined to that prefix is a
+    /// single-shard, local scan. The FS stack shards by the 8-byte inode, so all
+    /// of one inode's keys (every offset, every snapshot) live together and
+    /// per-inode reads/scans stay local, while different inodes spread for write
+    /// concurrency.
+    shard_prefix: usize,
     seq_gen: AtomicU64,
     // instrumentation (the wait-free witness)
     slow_ops: AtomicU64,
@@ -178,7 +186,13 @@ const K_FAST: usize = 2;
 
 impl WaitFreeRadixMap {
     pub fn new(shard_count: usize, max_threads: usize) -> Self {
-        assert!(shard_count >= 1 && max_threads >= 1);
+        Self::new_with_prefix(shard_count, max_threads, KEY_LEN)
+    }
+
+    /// Like `new`, but shard by the first `shard_prefix` key bytes (see
+    /// [`WaitFreeRadixMap::shard_prefix`]). `KEY_LEN` = shard by the whole key.
+    pub fn new_with_prefix(shard_count: usize, max_threads: usize, shard_prefix: usize) -> Self {
+        assert!(shard_count >= 1 && max_threads >= 1 && shard_prefix >= 1);
         let shards = (0..shard_count)
             .map(|_| Shard {
                 root: ArcSwap::from_pointee(Node::empty()),
@@ -189,6 +203,7 @@ impl WaitFreeRadixMap {
         WaitFreeRadixMap {
             shards,
             max_threads,
+            shard_prefix,
             seq_gen: AtomicU64::new(1),
             slow_ops: AtomicU64::new(0),
             total_help_rounds: AtomicU64::new(0),
@@ -197,11 +212,24 @@ impl WaitFreeRadixMap {
         }
     }
 
+    #[inline]
+    fn shard_of(&self, key: &[u8]) -> usize {
+        let p = self.shard_prefix.min(key.len());
+        shard_index(&key[..p], self.shards.len())
+    }
+
     /// Wait-free write. `tid` is the caller's thread id in `0..max_threads`.
     pub fn put(&self, tid: usize, key: &[u8; KEY_LEN], value: Value) {
-        assert!(tid < self.max_threads, "tid out of range");
         let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
-        let sh = &self.shards[shard_index(key, self.shards.len())];
+        self.put_with_seq(tid, key, value, seq);
+    }
+
+    /// Wait-free write with a caller-supplied `seq` — lets an upper layer (the
+    /// full FS stack) use one op-sequence for both the map's monotone apply and
+    /// the durability journal, so journal replay reconstructs the same state.
+    pub fn put_with_seq(&self, tid: usize, key: &[u8; KEY_LEN], value: Value, seq: u64) {
+        assert!(tid < self.max_threads, "tid out of range");
+        let sh = &self.shards[self.shard_of(key)];
 
         // FAST PATH (gated by `pending`, FIX 1).
         let mut attempt = 0;
@@ -285,16 +313,27 @@ impl WaitFreeRadixMap {
 
     /// Wait-free point read.
     pub fn get(&self, key: &[u8; KEY_LEN]) -> Option<Value> {
-        let root = self.shards[shard_index(key, self.shards.len())].load_root();
+        let root = self.shards[self.shard_of(key)].load_root();
         get_node(&root, key).cloned()
     }
 
+    /// Ordered range scan over `[lo, hi]`. When `lo` and `hi` share the shard
+    /// prefix (the common per-inode case), this is a **single-shard, local**
+    /// scan; otherwise it merges across all shards.
     pub fn range_inclusive(&self, lo: &[u8; KEY_LEN], hi: &[u8; KEY_LEN]) -> Vec<([u8; KEY_LEN], Value)> {
         let mut out = Vec::new();
-        for sh in &self.shards {
-            let root = sh.load_root();
+        let p = self.shard_prefix.min(KEY_LEN);
+        if lo[..p] == hi[..p] {
+            // Same shard prefix -> one shard holds the whole range.
+            let root = self.shards[self.shard_of(lo)].load_root();
             let mut path = Vec::with_capacity(KEY_LEN);
             collect(&root, &mut path, lo, hi, &mut out);
+        } else {
+            for sh in &self.shards {
+                let root = sh.load_root();
+                let mut path = Vec::with_capacity(KEY_LEN);
+                collect(&root, &mut path, lo, hi, &mut out);
+            }
         }
         out.sort_by_key(|e| e.0);
         out

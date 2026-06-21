@@ -39,6 +39,8 @@ pub mod sim;
 pub mod lockfree;
 /// Real, multi-threaded, **wait-free-write** CoW radix map (flat combining).
 pub mod waitfree;
+/// The full synthesis stack: wait-free map + in-key snapshots + journal.
+pub mod concurrent;
 
 pub use key::{decode, encode, Inode, Offset, SnapId, KEY_LEN};
 pub use snapshot::SnapshotTree;

@@ -6,10 +6,12 @@ synthesized in [`../non-bplus-fs-core-exploration.md`](../non-bplus-fs-core-expl
 > an **ordered, DRAM-authoritative adaptive radix trie**, journalled for
 > durability, with **in-key snapshot ids** and a **wait-free write** path.
 
-It builds the slice that exploration said carries the least risk to prototype
-first — the parts with **no kernel / no real-crash-consistency burden**:
-the ordered radix structure, snapshot visibility, journal replay (crash
-recovery), range scans, and a **step-level model of the concurrency claims**.
+It now assembles the **full stack** (`concurrent::ConcFs`): a real
+multi-threaded **wait-free-read / wait-free-write** radix map + in-key snapshots
++ journal durability + snapshot-consistent range scans, validated under real
+threads and crash recovery. It grew in layers, each verified before the next:
+sequential core → concurrency *model* → real **lock-free** map → real
+**wait-free** writes (loom-checked) → the composed stack.
 
 `unsafe`-free (`#![forbid(unsafe_code)]`). The sequential core is dependency-free;
 the **real lock-free layer** (`lockfree.rs`) uses one vetted crate, `arc-swap`,
@@ -21,11 +23,11 @@ workspace (own empty `[workspace]`) so it does not touch the user-owned workspac
 ## Run
 
 ```sh
-cargo test                                   # 26 tests: sequential + crash recovery + real-threads lock-free & wait-free
+cargo test                                   # 31 tests: sequential, crash recovery, lock-free, wait-free, full-stack
 cargo run --release --bin simulate           # sequential-core + concurrency-model report
-cargo run --release --bin simulate -- 50000  # [steps] [seed]
 cargo run --release --bin stress             # REAL multi-threaded lock-free + wait-free stress
-cargo run --release --bin stress -- 8 300000 256   # [threads] [ops/thread] [shards]
+cargo run --release --bin fsdemo             # FULL STACK: concurrent FS ops + snapshots + crash recovery
+cargo run --release --bin fsdemo -- 8 200000 # [threads] [ops/thread]
 ```
 
 ## What it demonstrates (mapped to the four constraints)
@@ -126,6 +128,38 @@ RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=2 cargo test --release --test loom_w
 
 [loom]: https://github.com/tokio-rs/loom
 
+## Full synthesis stack (`concurrent.rs`)
+
+`ConcFs` composes the verified pieces into the design the exploration arrived at —
+**one stack**:
+
+- **storage** = the wait-free radix map (`waitfree.rs`);
+- **snapshots** = in-key snapshot ids + a lock-free ancestry registry; reads
+  resolve the visible ancestor version (snapshot-consistent, not live-linearizable);
+- **durability** = a per-thread journal; recovery replays the merged, seq-ordered
+  log; the DRAM index is authoritative, durability is the separate journal (the
+  move that dissolves the wait-free-read vs durable-linearizability collision).
+
+One op-sequence drives both the map's monotone apply and the journal record, so
+**`recover()` reconstructs exactly the live state** — the capstone tests assert
+`recovered.get == live.get` after a concurrent run, which simultaneously witnesses
+**crash consistency** and **linearizability** (the concurrent run equals its own
+seq-order serialization).
+
+**Sharding for locality.** Keys shard by their **8-byte inode prefix**, not the
+whole key. So every key of one inode (all offsets, all snapshots) lives in one
+shard → per-inode point reads and range scans are single-shard/local, while
+different inodes spread for write concurrency. (Sharding by the *full* key instead
+made every band scan touch all shards — measured at ~50× slower; running the demo
+caught it. FS access is per-inode, so inode-prefix sharding is the right fit.)
+
+Measured (`fsdemo 8 200000`, 16 cores): 1.6M mixed ops (put/delete/snapshot/read)
+@ ~1.2 M ops/s with ~48k live snapshots; crash → replay 1.09M journal records →
+**0 recovered-vs-live mismatches** over 200k sampled reads.
+
+Concurrency of the whole stack: reads wait-free, writes wait-free, snapshot
+create lock-free, recovery single-threaded.
+
 ## Design notes & honest stubs
 
 - **`conc.rs` is a *model*; `lockfree.rs` is real.** `conc.rs` advances each
@@ -172,11 +206,16 @@ src/conc.rs       step-level concurrency MODEL: wait-free writers, contention co
 src/lockfree.rs   REAL lock-free CoW radix map (atomics via arc-swap): wait-free reads,
                   lock-free sharded writes, Arc-refcount reclamation, O(shards) snapshots
 src/waitfree.rs   REAL wait-free-WRITE CoW radix map: per-shard flat combining
-                  (gated fast path + announce/help + seq-stamped monotone apply)
+                  (gated fast path + announce/help + seq-stamped monotone apply);
+                  prefix-sharding for per-inode scan locality
+src/concurrent.rs FULL STACK: wait-free map + in-key snapshots (lock-free ancestry)
+                  + journal durability + snapshot-consistent reads/range (ConcFs)
 src/sim.rs        simulator: workload + differential oracle + crash test + concurrency model
 src/bin/simulate.rs   sequential-core + concurrency-model report
 src/bin/stress.rs     REAL multi-threaded lock-free + wait-free stress + throughput report
+src/bin/fsdemo.rs     FULL STACK demo: concurrent FS ops + snapshots + crash recovery
 tests/correctness.rs  sequential end-to-end tests
 tests/concurrent.rs   real-threads lock-free & wait-free correctness + bounded-help-rounds
+tests/stack.rs        full-stack: concurrent workload -> crash -> recover == live
 tests/loom_waitfree.rs  loom model-check of the wait-free gate+combine core (cfg(loom))
 ```
