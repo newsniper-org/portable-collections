@@ -1,0 +1,21 @@
+[package]
+name = "radix-fs-prototype"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Userspace prototype + simulator for the ordered-radix, journalled, snapshot-native, wait-free-write FS-core design (non-B+tree synthesis)."
+
+# Detached from the parent `portable-collections` workspace on purpose:
+# this is a Claude-owned experiment; the user owns the workspace Cargo.toml.
+[workspace]
+
+[lib]
+name = "radix_fs_prototype"
+path = "src/lib.rs"
+
+[[bin]]
+name = "simulate"
+path = "src/bin/simulate.rs"
+
+[profile.release]
+opt-level = 3
