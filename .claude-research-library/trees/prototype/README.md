@@ -136,9 +136,10 @@ RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=2 cargo test --release --test loom_w
 - **storage** = the wait-free radix map (`waitfree.rs`);
 - **snapshots** = in-key snapshot ids + a lock-free ancestry registry; reads
   resolve the visible ancestor version (snapshot-consistent, not live-linearizable);
-- **durability** = a per-thread journal; recovery replays the merged, seq-ordered
-  log; the DRAM index is authoritative, durability is the separate journal (the
-  move that dissolves the wait-free-read vs durable-linearizability collision).
+- **durability** = a **lock-free per-core journal** (per-thread Treiber log, no
+  lock on append); recovery replays the merged, seq-ordered log; the DRAM index
+  is authoritative, durability is the separate journal (the move that dissolves
+  the wait-free-read vs durable-linearizability collision).
 
 One op-sequence drives both the map's monotone apply and the journal record, so
 **`recover()` reconstructs exactly the live state** — the capstone tests assert

@@ -8,8 +8,8 @@
 //! Concurrency guarantees of the whole stack:
 //! * reads (`get` / `range`) are **wait-free** — a band scan over the wait-free
 //!   map (immutable walk) + a wait-free snapshot-ancestry resolve;
-//! * writes (`put` / `delete`) are **wait-free** (the map) + a per-thread
-//!   journal append (uncontended) ;
+//! * writes (`put` / `delete`) are **wait-free** (the map) + a **lock-free
+//!   per-core** journal append (Treiber push, no lock);
 //! * `create_snapshot` is **lock-free** (one `fetch_add` + releases);
 //! * recovery (`recover`) replays the merged journal single-threaded.
 //!
@@ -20,16 +20,65 @@
 //! seq-order serialization).
 //!
 //! Prototype simplifications (documented): the snapshot registry is a fixed-cap
-//! atomic array (lock-free create, wait-free query); the per-thread journal uses
-//! an uncontended `Mutex<Vec<_>>` per thread (a production system would use a
-//! lock-free per-core log). Neither is on the wait-free read path.
+//! atomic array (lock-free create, wait-free query); the journal is a lock-free
+//! per-core Treiber log (the in-memory shape of a real FS's lock-free per-core
+//! on-disk log). Neither is on the wait-free read path.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::Arc;
+
+use arc_swap::ArcSwapOption;
 
 use crate::key::{decode, encode, Inode, Offset, SnapId};
 use crate::store::Value;
 use crate::waitfree::WaitFreeRadixMap;
+
+/// A lock-free **per-core** write-ahead log. Each thread appends only to its own
+/// head (single producer) via an `arc-swap` Treiber push (`rcu`) — no lock, no
+/// cross-core contention on append. Drain (after join) walks each list. This
+/// replaces the earlier per-thread `Mutex<Vec<_>>`, removing the last lock from
+/// the write path; a real FS would use a lock-free per-core on-disk log, of
+/// which this is the in-memory shape.
+struct LogNode {
+    op: ConcOp,
+    next: Option<Arc<LogNode>>,
+}
+
+struct PerCoreJournal {
+    heads: Vec<ArcSwapOption<LogNode>>,
+}
+
+impl PerCoreJournal {
+    fn new(threads: usize) -> Self {
+        PerCoreJournal {
+            heads: (0..threads).map(|_| ArcSwapOption::empty()).collect(),
+        }
+    }
+
+    /// Lock-free append to the calling core's own log.
+    fn append(&self, tid: usize, op: ConcOp) {
+        self.heads[tid].rcu(|cur| {
+            Some(Arc::new(LogNode {
+                op: op.clone(),
+                next: cur.clone(),
+            }))
+        });
+    }
+
+    /// Drain all per-core logs into one seq-ordered op list (called after join).
+    fn drain_sorted(&self) -> Vec<ConcOp> {
+        let mut ops = Vec::new();
+        for head in &self.heads {
+            let mut cur = head.load_full();
+            while let Some(node) = cur {
+                ops.push(node.op.clone());
+                cur = node.next.clone();
+            }
+        }
+        ops.sort_by_key(|o| o.seq());
+        ops
+    }
+}
 
 /// Lock-free, fixed-capacity snapshot tree (parent + depth per id). Snapshots
 /// are never deleted in this prototype, so the registry only grows.
@@ -152,7 +201,7 @@ impl ConcOp {
 pub struct ConcFs {
     map: WaitFreeRadixMap,
     snaps: ConcSnapshots,
-    journal: Vec<Mutex<Vec<ConcOp>>>,
+    journal: PerCoreJournal,
     seq_gen: AtomicU64,
     max_threads: usize,
 }
@@ -166,7 +215,7 @@ impl ConcFs {
             // across shards for write concurrency.
             map: WaitFreeRadixMap::new_with_prefix(shards, max_threads, 8),
             snaps: ConcSnapshots::new(snap_cap),
-            journal: (0..max_threads).map(|_| Mutex::new(Vec::new())).collect(),
+            journal: PerCoreJournal::new(max_threads),
             seq_gen: AtomicU64::new(1),
             max_threads,
         }
@@ -184,7 +233,7 @@ impl ConcFs {
     pub fn put(&self, tid: usize, inode: Inode, offset: Offset, snap: SnapId, value: Value) {
         let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
         self.map.put_with_seq(tid, &encode(inode, offset, snap), value.clone(), seq);
-        self.journal[tid].lock().unwrap().push(ConcOp::Put { inode, offset, snap, value, seq });
+        self.journal.append(tid, ConcOp::Put { inode, offset, snap, value, seq });
     }
 
     /// Snapshot-scoped delete (tombstone).
@@ -196,7 +245,7 @@ impl ConcFs {
     pub fn create_snapshot(&self, tid: usize, parent: SnapId) -> SnapId {
         let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
         let child = self.snaps.add_child(parent);
-        self.journal[tid].lock().unwrap().push(ConcOp::Snap { parent, child, seq });
+        self.journal.append(tid, ConcOp::Snap { parent, child, seq });
         child
     }
 
@@ -247,12 +296,7 @@ impl ConcFs {
 
     /// Drain the per-thread journals into one seq-ordered op list (the durable log).
     pub fn drained_ops(&self) -> Vec<ConcOp> {
-        let mut ops: Vec<ConcOp> = Vec::new();
-        for log in &self.journal {
-            ops.extend(log.lock().unwrap().iter().cloned());
-        }
-        ops.sort_by_key(|o| o.seq());
-        ops
+        self.journal.drain_sorted()
     }
 
     /// Recover a fresh core by replaying a (possibly torn-prefix) journal.
