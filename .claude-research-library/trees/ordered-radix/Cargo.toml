@@ -1,0 +1,20 @@
+[package]
+name = "ordered-radix"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "no_std, unsafe-free ordered copy-on-write radix map with O(1) snapshots; optional lock-free concurrent variant. Extracted for filesystem-researches (in-DRAM metadata cache + on-disk backbone candidate)."
+
+# Detached from the parent workspace (Claude-owned experiment / hand-off crate).
+[workspace]
+
+[features]
+default = []
+# The lock-free concurrent map (atomic-Arc root via arc-swap); implies std.
+concurrent = ["dep:arc-swap"]
+
+[dependencies]
+arc-swap = { version = "1", optional = true }
+
+[dev-dependencies]
+# (none — tests use only std test harness)
