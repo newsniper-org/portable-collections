@@ -9,6 +9,12 @@ description = "Userspace prototype + simulator for the ordered-radix, journalled
 # this is a Claude-owned experiment; the user owns the workspace Cargo.toml.
 [workspace]
 
+# The single dependency: arc-swap provides a lock-free atomic `Arc` swap with a
+# safe API, so the real lock-free layer stays `unsafe`-free (reclamation is Arc
+# refcounting). This is the "lean on a vetted crate" path the analysis endorsed.
+[dependencies]
+arc-swap = "1"
+
 [lib]
 name = "radix_fs_prototype"
 path = "src/lib.rs"
@@ -16,6 +22,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "simulate"
 path = "src/bin/simulate.rs"
+
+[[bin]]
+name = "stress"
+path = "src/bin/stress.rs"
 
 [profile.release]
 opt-level = 3
