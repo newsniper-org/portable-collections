@@ -15,6 +15,11 @@ description = "Userspace prototype + simulator for the ordered-radix, journalled
 [dependencies]
 arc-swap = "1"
 
+# loom is only pulled in for the model-checking build (RUSTFLAGS="--cfg loom").
+# Normal `cargo test` never compiles it.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [lib]
 name = "radix_fs_prototype"
 path = "src/lib.rs"
@@ -29,3 +34,7 @@ path = "src/bin/stress.rs"
 
 [profile.release]
 opt-level = 3
+
+[lints.rust]
+# `loom` is a known custom cfg used only by tests/loom_waitfree.rs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

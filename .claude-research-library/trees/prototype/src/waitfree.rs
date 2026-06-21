@@ -30,12 +30,18 @@
 //! sequence — which is exactly why the bound is clean here.
 //!
 //! ## Honesty
-//! Reads stay **wait-free** (atomic load + immutable walk). Writes are now
+//! Reads stay **wait-free** (atomic load + immutable walk). Writes are
 //! wait-free *by the above argument*; the `max_help_rounds` instrumentation lets
 //! the stress harness show, empirically, that per-op work stays bounded under
 //! adversarial hot-key contention (where the lock-free map's retry tail grows).
-//! A machine-checked model (loom) of the gate+combine core is the remaining
-//! formal step the review flagged.
+//!
+//! The gate+combine core is also **loom model-checked** (see
+//! `tests/loom_waitfree.rs`): loom exhaustively explores all interleavings of a
+//! faithful re-expression of this protocol (it cannot check `arc-swap` directly)
+//! and verifies, for N = 2 (exhaustive) and N = 3 (bounded preemptions): the
+//! max-seq write always wins (no lost update — FIX 2), every writer completes
+//! (no deadlock/livelock), and a slow-path writer commits within `2N+5` rounds
+//! (the wait-free bound, machine-checked for small N).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;

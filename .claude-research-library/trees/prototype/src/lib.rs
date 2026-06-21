@@ -21,9 +21,11 @@
 //!   `O(K + P)` regardless of contention; the hot-key stress shows max
 //!   help-rounds/op stays a small constant while the lock-free retry tail grows.
 //!
-//! Remaining formal step (documented): a machine-checked (loom) model of the
-//! gate+combine core; the current wait-free claim rests on the bound argument +
-//! empirical bounded-rounds instrumentation.
+//! The gate+combine core is **loom model-checked** (`tests/loom_waitfree.rs`):
+//! exhaustive interleaving exploration verifies safety (max-seq wins, no lost
+//! update), completion (no deadlock/livelock), and the per-op round bound, for
+//! N = 2 (exhaustive) and N = 3 (bounded preemptions). The asymptotic O(K+P)
+//! starvation-free bound remains the analytical argument loom corroborates.
 #![forbid(unsafe_code)]
 
 pub mod key;

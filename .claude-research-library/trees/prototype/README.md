@@ -98,9 +98,33 @@ Measured (`stress 8 300000 256`):
 | vs lock-free on the same hot key | **532,307 retries** (grows with contention) — the tail wait-free bounds |
 
 The `wf_hot_key_no_torn_and_bounded_help_rounds` test asserts the per-op
-help-round count stays a small constant over ~96k contended ops. Remaining formal
-step: a loom-model-checked proof of the gate+combine core (the claim currently
-rests on the bound argument + this empirical bounded-rounds instrumentation).
+help-round count stays a small constant over ~96k contended ops.
+
+### Loom model-check (`tests/loom_waitfree.rs`)
+
+The gate+combine core is **machine-verified with [loom]** — exhaustive
+interleaving exploration under the C11 memory model. (`arc-swap` can't be
+loom-checked, so the test re-expresses the protocol core in loom atomics:
+single shard, single contended key, N writers with distinct seqs.) Loom proves,
+over every interleaving:
+
+- **safety** — the max-seq write always wins (no lost update / double-fold — FIX 2);
+- **completion** — every writer finishes (loom flags deadlock; the in-loop
+  `rounds <= 2N+5` assert turns any livelock into a failure);
+- **bounded rounds** — a slow-path writer commits within `2N+5` rounds.
+
+Verified: `N=2` exhaustive (both pure-combine `k=0` and gated fast/slow `k=1`),
+`N=3` with `LOOM_MAX_PREEMPTIONS=2`. The asymptotic `O(K+P)` starvation-free
+bound stays an analytical argument that loom's small-instance proofs corroborate.
+
+```sh
+RUSTFLAGS="--cfg loom" cargo test --release --test loom_waitfree -- _2      # exhaustive (N=2)
+RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=2 cargo test --release --test loom_waitfree loom_pure_combine_3
+```
+
+(loom is a `cfg(loom)`-gated dependency; normal `cargo test` never compiles it.)
+
+[loom]: https://github.com/tokio-rs/loom
 
 ## Design notes & honest stubs
 
@@ -154,4 +178,5 @@ src/bin/simulate.rs   sequential-core + concurrency-model report
 src/bin/stress.rs     REAL multi-threaded lock-free + wait-free stress + throughput report
 tests/correctness.rs  sequential end-to-end tests
 tests/concurrent.rs   real-threads lock-free & wait-free correctness + bounded-help-rounds
+tests/loom_waitfree.rs  loom model-check of the wait-free gate+combine core (cfg(loom))
 ```
