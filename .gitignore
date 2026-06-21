@@ -3,3 +3,6 @@ Cargo.lock
 
 # Typst-rendered reports (regenerate with `typst compile benches/report.typ`)
 *.pdf
+
+# cross-project local request mailboxes (mirrored, never committed)
+.local-*-*/
