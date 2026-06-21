@@ -21,10 +21,10 @@ workspace (own empty `[workspace]`) so it does not touch the user-owned workspac
 ## Run
 
 ```sh
-cargo test                                   # 21 tests: sequential + crash recovery + real-threads concurrency
+cargo test                                   # 26 tests: sequential + crash recovery + real-threads lock-free & wait-free
 cargo run --release --bin simulate           # sequential-core + concurrency-model report
 cargo run --release --bin simulate -- 50000  # [steps] [seed]
-cargo run --release --bin stress             # REAL multi-threaded lock-free stress + throughput
+cargo run --release --bin stress             # REAL multi-threaded lock-free + wait-free stress
 cargo run --release --bin stress -- 8 300000 256   # [threads] [ops/thread] [shards]
 ```
 
@@ -65,12 +65,42 @@ Measured (16-core box, `stress 8 300000 256`):
 | single-hot-key contention | ~2× retries/write (the serialization the analysis predicted) — but **0** torn/garbage reads |
 | snapshot isolation under 8 overwriters | **0** snapshot drift (CoW immutability holds) |
 
-**Honest scope:** writes are **lock-free, not wait-free** — a same-shard race
-retries. Sharding makes the retry tail small in practice (the
-throughput-for-bounded-tail trade you authorized), but a *formally* wait-free
-write (descriptor + helping, or an ART-style mutable node with Crystalline
-reclamation) is the remaining open problem flagged in the exploration. The hot-key
-test deliberately shows the lock-free retry tail that wait-free would bound.
+**Scope:** writes here are **lock-free, not wait-free** — a same-shard race
+retries. The hot-key test deliberately shows that retry tail. The **wait-free
+write path** that bounds it is the next module.
+
+## Wait-free write layer (`waitfree.rs`)
+
+`WaitFreeRadixMap` makes the **write** path wait-free too — the open problem the
+exploration flagged. It was designed by a multi-agent design+adversarial-verify
+workflow: four candidate protocols were proposed and attacked; the two survivors
+converged on **per-shard flat combining** (Kogan–Petrank fast-path/slow-path)
+with the two fixes the review forced:
+
+- **Gate the fast path** — a per-shard `pending` counter; once any writer
+  announces, all others route through the combiner. Closes the starvation hole
+  (an unbounded stream of bare fast CASes could otherwise starve an announced
+  writer forever).
+- **Seq-stamped monotone apply** — values store `(op_seq, value)`; a write
+  applies only if its seq is newer. Makes helping idempotent and closes the
+  lost-update / double-fold holes.
+
+A write costs `O(K)` fast attempts + `O(P)` help rounds (each `O(P·KEY_LEN)`):
+a hard `O(K + P)` bound independent of contention *duration* — no schedule can
+starve a writer. Still `unsafe`-free (arc-swap + std atomics), Arc reclamation.
+
+Measured (`stress 8 300000 256`):
+
+| | result |
+|---|---|
+| disjoint write storm | 2.4M writes @ ~1.3M/s; **2,399,801 / 2,400,000 fast-path wins** (≈0 tax uncontended) |
+| hot-key, 240k ops on ONE key, 8 writers | **max help-rounds/op = 4** — a small constant (the wait-free witness) |
+| vs lock-free on the same hot key | **532,307 retries** (grows with contention) — the tail wait-free bounds |
+
+The `wf_hot_key_no_torn_and_bounded_help_rounds` test asserts the per-op
+help-round count stays a small constant over ~96k contended ops. Remaining formal
+step: a loom-model-checked proof of the gate+combine core (the claim currently
+rests on the bound argument + this empirical bounded-rounds instrumentation).
 
 ## Design notes & honest stubs
 
@@ -117,9 +147,11 @@ src/journal.rs    write-ahead journal (durability authority); torn-prefix model
 src/conc.rs       step-level concurrency MODEL: wait-free writers, contention contrast
 src/lockfree.rs   REAL lock-free CoW radix map (atomics via arc-swap): wait-free reads,
                   lock-free sharded writes, Arc-refcount reclamation, O(shards) snapshots
+src/waitfree.rs   REAL wait-free-WRITE CoW radix map: per-shard flat combining
+                  (gated fast path + announce/help + seq-stamped monotone apply)
 src/sim.rs        simulator: workload + differential oracle + crash test + concurrency model
 src/bin/simulate.rs   sequential-core + concurrency-model report
-src/bin/stress.rs     REAL multi-threaded lock-free stress + throughput report
+src/bin/stress.rs     REAL multi-threaded lock-free + wait-free stress + throughput report
 tests/correctness.rs  sequential end-to-end tests
-tests/concurrent.rs   real-threads lock-free correctness (disjoint, hot-key, snapshot, range)
+tests/concurrent.rs   real-threads lock-free & wait-free correctness + bounded-help-rounds
 ```

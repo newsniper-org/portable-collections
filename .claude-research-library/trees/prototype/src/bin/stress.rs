@@ -16,6 +16,7 @@ use std::time::Instant;
 use radix_fs_prototype::key::encode;
 use radix_fs_prototype::lockfree::LockFreeRadixMap;
 use radix_fs_prototype::store::Value;
+use radix_fs_prototype::waitfree::WaitFreeRadixMap;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -134,7 +135,63 @@ fn main() {
     println!("\n3) snapshot isolation under {} concurrent overwriters", threads);
     println!("   snapshot drift: {snap_bad} (must be 0 — CoW snapshot is immutable)");
 
-    let ok = bad == 0 && observed_bad.load(Ordering::Relaxed) == 0 && snap_bad == 0;
+    // ---- 4. WAIT-FREE map: disjoint throughput + hot-key bounded tail ----
+    let wf = Arc::new(WaitFreeRadixMap::new(shards, threads));
+    let barrier = Arc::new(Barrier::new(threads));
+    let start = Instant::now();
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let wf = Arc::clone(&wf);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..per {
+                    wf.put(t, &encode(t as u64, i, 1), Value::Inode(i));
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let wf_dur = start.elapsed();
+    let wf_secs = wf_dur.as_secs_f64();
+    let wf_mops = total as f64 / wf_secs / 1.0e6;
+    let mut wf_bad = 0u64;
+    for t in 0..threads {
+        for i in (0..per).step_by((per / 64).max(1) as usize) {
+            if wf.get(&encode(t as u64, i, 1)) != Some(Value::Inode(i)) {
+                wf_bad += 1;
+            }
+        }
+    }
+
+    // hot-key contention on the wait-free map (same workload as section 2)
+    let wf_hot = Arc::new(WaitFreeRadixMap::new(shards, threads));
+    let hot_key = encode(7, 7, 1);
+    let barrier = Arc::new(Barrier::new(threads));
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let wf_hot = Arc::clone(&wf_hot);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..hper {
+                    wf_hot.put(t, &hot_key, Value::Inode(t as u64 * 1_000_000 + i));
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    println!("\n4) WAIT-FREE write path (flat combining; gated fast path + seq-stamped apply)");
+    println!("   disjoint storm: {total} writes in {wf_secs:.3}s => {wf_mops:.2} M writes/s; fast-path wins {}, slow-path ops {}", wf.fast_wins(), wf.slow_ops());
+    println!("   disjoint final-state mismatches: {wf_bad}");
+    println!("   hot-key ({} writers x {hper}): MAX help-rounds/op = {}  (BOUNDED ~O(P); the wait-free witness)", threads, wf_hot.max_help_rounds());
+    println!("   contrast: lock-free hot-key retries = {} (grows with contention)  vs  wait-free max rounds/op = {} (constant)", hot.retries(), wf_hot.max_help_rounds());
+
+    let ok = bad == 0 && observed_bad.load(Ordering::Relaxed) == 0 && snap_bad == 0 && wf_bad == 0;
     println!("\nRESULT: {}", if ok { "OK — lock-free, safe, snapshot-isolated under real threads." } else { "FAILED" });
     if !ok {
         std::process::exit(1);
