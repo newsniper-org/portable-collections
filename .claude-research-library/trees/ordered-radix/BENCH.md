@@ -105,3 +105,43 @@ raw ops. The open trade is insert throughput (CoW cost, comparable to a CoW
 B+tree) and dir-listing (intrinsic to hashed keys). Recommend radix(ART) as the
 backbone candidate subject to the on-disk node-encoding / firmware-parsability
 work (A3-3) being designed in from the start.
+
+---
+
+# ConcurrentArt throughput (lock-free ART, multi-thread)
+
+`cargo run --release --features concurrent --bin cbench` (16-core box, 400k
+ops/thread, sharded by 8-byte inode prefix).
+
+| threads | insert (disjoint inodes) | wait-free read |
+|--:|--:|--:|
+| 1 | 1.98 M/s (1.00×) | 4.72 M/s (1.00×) |
+| 2 | 2.75 M/s (1.39×) | 9.14 M/s (1.94×) |
+| 4 | 3.09 M/s (1.56×) | 17.50 M/s (3.71×) |
+| 8 | 2.24 M/s (1.13×) | **24.90 M/s (5.28×)** |
+
+Hot-shard (8 threads → one inode/one shard): **0.39 M ins/s** (~6× below disjoint).
+
+## Reading
+
+- **Reads scale well (wait-free): ~5.3× at 8 threads, ~25 M get/s.** Sub-linear
+  only because `load_full` bumps the root `Arc` refcount (an atomic) per read;
+  a `Guard`-based load would scale closer to linear. This is the strong axis —
+  and the right one for an FS backbone where reads dominate.
+- **Inserts scale poorly** — peak ~3 M/s at 4 threads, *degrading* at 8. Cause:
+  CoW path-copy of **wide adaptive nodes is allocation-heavy** — inserting into a
+  populated directory clones its N256 node (a 256-slot array) every time, so write
+  throughput is allocator/memory-bandwidth bound and does not parallelize. Same-
+  shard contention adds rcu-retry on top (the 0.39 M/s hot case).
+
+## Implication for the backbone
+
+The read story is excellent; the **concurrent write story is the weak point**, and
+it is the *CoW wide-node clone*, not the radix idea. Mitigations if write
+throughput matters: (a) batch writes through the journal (an FS already does
+this) so the hot path is reads + bulk apply; (b) the prototype's **wait-free
+combining** write path (`../prototype/src/waitfree.rs`) which coalesces many
+writes per root swap; (c) shrink max node fanout or use partial-node persistence
+to cut per-insert clone cost. For a read-dominated, batch-written FS backbone,
+ConcurrentArt's profile (wait-free scalable reads + O(1) snapshots, slower
+single-writer throughput absorbed by batching) is acceptable.
