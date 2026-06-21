@@ -13,6 +13,10 @@ default = []
 # The lock-free concurrent map (atomic-Arc root via arc-swap); implies std.
 concurrent = ["dep:arc-swap"]
 
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 arc-swap = { version = "1", optional = true }
 

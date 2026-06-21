@@ -202,6 +202,31 @@ impl<V: Clone> CowRadixMap<V> {
     }
 }
 
+impl<V> CowRadixMap<V> {
+    /// Visit every `(key, &value)` in `[lo, hi]` in ascending order, without
+    /// allocating a result vector or cloning keys/values (the non-materializing
+    /// counterpart to [`OrderedMap::range`]).
+    pub fn for_each_range<F: FnMut(&[u8], &V)>(&self, lo: &[u8], hi: &[u8], mut f: F) {
+        fn rec<V, F: FnMut(&[u8], &V)>(node: &Node<V>, path: &mut Vec<u8>, lo: &[u8], hi: &[u8], f: &mut F) {
+            if let Some(v) = &node.value {
+                if path.as_slice() >= lo && path.as_slice() <= hi {
+                    f(path, v);
+                }
+            }
+            for (b, child) in &node.children {
+                path.push(*b);
+                let len = path.len();
+                if !(path.as_slice() < &lo[..len.min(lo.len())] || path.as_slice() > &hi[..len.min(hi.len())]) {
+                    rec(child, path, lo, hi, f);
+                }
+                path.pop();
+            }
+        }
+        let mut path = Vec::new();
+        rec(&self.root, &mut path, lo, hi, &mut f);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
