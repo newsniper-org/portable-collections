@@ -525,3 +525,84 @@ mod tests {
         assert!(h[3] > 0 || h[2] > 0, "expected wide nodes (N48/N256), got {h:?}");
     }
 }
+
+// ---- concurrent ART (lock-free), closing criterion (B)6 ----
+#[cfg(feature = "concurrent")]
+pub use conc::ConcurrentArt;
+
+#[cfg(feature = "concurrent")]
+mod conc {
+    use super::{get_rec, insert_rec, Node};
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use arc_swap::ArcSwapOption;
+
+    fn insert_into<V: Clone>(root: &Option<Arc<Node<V>>>, key: &[u8], value: V) -> Arc<Node<V>> {
+        match root {
+            None => Arc::new(Node::Leaf { key: key.to_vec(), value }),
+            Some(r) => insert_rec(r, key, 0, value),
+        }
+    }
+
+    fn shard_of(key: &[u8], prefix: usize, n: usize) -> usize {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in &key[..prefix.min(key.len())] {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        (h % n as u64) as usize
+    }
+
+    /// Lock-free concurrent Adaptive Radix Tree (CoW root swap). Demonstrates
+    /// that ART's adaptive node-type growth (N4→16→48→256), being a pure CoW
+    /// **node replacement**, composes with an atomic-`Arc` root unchanged:
+    /// **wait-free reads, lock-free writes, `Arc` reclamation** — exactly as the
+    /// naive `ConcurrentRadixMap`, but now with ART's shallow depth + low memory.
+    pub struct ConcurrentArt<V> {
+        shards: Vec<ArcSwapOption<Node<V>>>,
+        prefix: usize,
+    }
+
+    impl<V: Clone> ConcurrentArt<V> {
+        pub fn new(shard_count: usize, shard_prefix: usize) -> Self {
+            assert!(shard_count >= 1 && shard_prefix >= 1);
+            ConcurrentArt {
+                shards: (0..shard_count).map(|_| ArcSwapOption::empty()).collect(),
+                prefix: shard_prefix,
+            }
+        }
+
+        /// Lock-free insert. ART node-type growth happens inside the path-copy and
+        /// is published by the single root CAS — no in-place mutation, no SMO.
+        pub fn insert(&self, key: &[u8], value: V) {
+            let s = &self.shards[shard_of(key, self.prefix, self.shards.len())];
+            s.rcu(|cur| Some(insert_into(cur, key, value.clone())));
+        }
+
+        /// Wait-free point read.
+        pub fn get(&self, key: &[u8]) -> Option<V> {
+            let root = self.shards[shard_of(key, self.prefix, self.shards.len())].load_full();
+            root.and_then(|r| get_rec(&r, key, 0).cloned())
+        }
+
+        /// O(shards) immutable snapshot (capture each shard root).
+        pub fn snapshot(&self) -> ArtSnapshot<V> {
+            ArtSnapshot {
+                roots: self.shards.iter().map(|s| s.load_full()).collect(),
+                prefix: self.prefix,
+            }
+        }
+    }
+
+    pub struct ArtSnapshot<V> {
+        roots: Vec<Option<Arc<Node<V>>>>,
+        prefix: usize,
+    }
+
+    impl<V: Clone> ArtSnapshot<V> {
+        pub fn get(&self, key: &[u8]) -> Option<V> {
+            let idx = shard_of(key, self.prefix, self.roots.len());
+            self.roots[idx].as_ref().and_then(|r| get_rec(r, key, 0).cloned())
+        }
+    }
+}

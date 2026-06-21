@@ -35,4 +35,7 @@ pub use cow::CowRadixMap;
 pub use traits::{OrderedMap, SnapshotMap};
 
 #[cfg(feature = "concurrent")]
+pub use art::ConcurrentArt;
+
+#[cfg(feature = "concurrent")]
 pub mod concurrent;
