@@ -196,3 +196,25 @@ fn art_concurrent_batch_apply_threads() {
         }
     }
 }
+
+#[test]
+fn art_per_shard_max_seq() {
+    use ordered_radix::ConcurrentArt;
+    let m = ConcurrentArt::<u64>::new(64, 8);
+    let a = k(10, 0);
+    let b = k(99, 0);
+    let (sa, sb) = (m.shard_index(&a), m.shard_index(&b));
+    m.apply(&a, 1, 50);
+    m.apply(&b, 2, 200);
+    assert!(m.shard_max_seq(sa) >= 50);
+    assert!(m.shard_max_seq(sb) >= 200);
+    assert_eq!(m.integrated_generation(), 200);
+    // a shard that received no writes stays 0 -> recovery can skip it entirely
+    if let Some(empty) = (0..m.num_shards()).find(|s| *s != sa && *s != sb) {
+        assert_eq!(m.shard_max_seq(empty), 0);
+    }
+    // batch-apply also updates per-shard max
+    m.apply_batch(&[(a.to_vec(), 9, 300)]);
+    assert!(m.shard_max_seq(sa) >= 300);
+    assert_eq!(m.integrated_generation(), 300);
+}

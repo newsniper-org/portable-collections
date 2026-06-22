@@ -599,6 +599,9 @@ mod conc {
     /// SMO-free**.
     pub struct ConcurrentArt<V> {
         shards: Vec<Slot<V>>,
+        /// Per-shard max applied op_seq — lets recovery bound each shard's scan
+        /// independently (a global max can't, if one shard races ahead).
+        shard_max: Vec<AtomicU64>,
         prefix: usize,
         seq_gen: AtomicU64,
         max_seq: AtomicU64,
@@ -610,6 +613,7 @@ mod conc {
             assert!(shard_count >= 1 && shard_prefix >= 1);
             ConcurrentArt {
                 shards: (0..shard_count).map(|_| ArcSwapOption::empty()).collect(),
+                shard_max: (0..shard_count).map(|_| AtomicU64::new(0)).collect(),
                 prefix: shard_prefix,
                 seq_gen: AtomicU64::new(1),
                 max_seq: AtomicU64::new(0),
@@ -630,8 +634,9 @@ mod conc {
         /// caller (e.g. LVIAARC) owns the op-sequence space; the backbone only
         /// requires it be monotonic per key.
         pub fn apply(&self, key: &[u8], value: V, op_seq: u64) {
-            self.slot(key)
-                .rcu(|cur| insert_mono(cur, key, value.clone(), op_seq).or_else(|| cur.clone()));
+            let idx = shard_of(key, self.prefix, self.shards.len());
+            self.shards[idx].rcu(|cur| insert_mono(cur, key, value.clone(), op_seq).or_else(|| cur.clone()));
+            self.shard_max[idx].fetch_max(op_seq, Ordering::Relaxed);
             self.max_seq.fetch_max(op_seq, Ordering::Relaxed);
         }
 
@@ -645,9 +650,12 @@ mod conc {
             }
             let n = self.shards.len();
             let mut by_shard: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+            let mut shard_maxseq = alloc::vec![0u64; n];
             let mut maxseq = 0u64;
             for (i, (k, _, seq)) in ops.iter().enumerate() {
-                by_shard[shard_of(k, self.prefix, n)].push(i);
+                let sh = shard_of(k, self.prefix, n);
+                by_shard[sh].push(i);
+                shard_maxseq[sh] = shard_maxseq[sh].max(*seq);
                 maxseq = maxseq.max(*seq);
             }
             for (sh, idxs) in by_shard.iter().enumerate() {
@@ -664,6 +672,7 @@ mod conc {
                     }
                     root
                 });
+                self.shard_max[sh].fetch_max(shard_maxseq[sh], Ordering::Relaxed);
             }
             self.max_seq.fetch_max(maxseq, Ordering::Relaxed);
         }
@@ -683,6 +692,25 @@ mod conc {
         /// "is everything up to seq S already in the backbone?").
         pub fn integrated_generation(&self) -> u64 {
             self.max_seq.load(Ordering::Relaxed)
+        }
+
+        /// Number of shards (recovery iterates these).
+        pub fn num_shards(&self) -> usize {
+            self.shards.len()
+        }
+
+        /// The shard a key maps to (inode-prefix hash) — so the cache can group
+        /// its own ops per shard for `apply_batch` / recovery.
+        pub fn shard_index(&self, key: &[u8]) -> usize {
+            shard_of(key, self.prefix, self.shards.len())
+        }
+
+        /// **Per-shard** max applied op_seq — recovery scans shard `s` need only
+        /// reconcile cached ops with seq > `shard_max_seq(s)` (a global max
+        /// over-scans when one shard races ahead). Low-priority companion to
+        /// `key_seq` / `integrated_generation`.
+        pub fn shard_max_seq(&self, shard: usize) -> u64 {
+            self.shard_max[shard].load(Ordering::Relaxed)
         }
 
         /// O(shards) immutable snapshot.

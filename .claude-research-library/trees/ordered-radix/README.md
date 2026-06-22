@@ -64,7 +64,9 @@ the backbone for `filesystem-researches`' LVIAARC write-back cache. Beyond
   transition per shard** (atomic, monotone, order-independent) — the LVIAARC
   flush primitive (public generalization of the prototype's wait-free `help`).
 - `key_seq(key) -> Option<u64>` — per-key integrated generation (recovery
-  dominance query); `integrated_generation() -> u64` — coarse max applied seq.
+  dominance query); `integrated_generation() -> u64` — coarse max applied seq;
+  `shard_max_seq(s)` + `shard_index(key)` + `num_shards()` — **per-shard** max
+  seq so recovery bounds each shard's scan independently.
 - node-type growth (N4→256) is a CoW **node replacement**, so batches commit
   SMO-free as a single root CAS — wait-free reads, lock-free writes preserved.
 
