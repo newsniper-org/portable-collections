@@ -1,7 +1,9 @@
 [package]
 name = "radix-fs-prototype"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+# Project-wide toolchain floor (channel-agnostic MSRV).
+rust-version = "1.96"
 publish = false
 description = "Userspace prototype + simulator for the ordered-radix, journalled, snapshot-native, wait-free-write FS-core design (non-B+tree synthesis)."
 

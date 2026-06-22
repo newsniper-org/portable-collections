@@ -1,7 +1,9 @@
 [package]
 name = "ordered-radix"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+# Project-wide toolchain floor (channel-agnostic MSRV).
+rust-version = "1.96"
 publish = false
 description = "no_std, unsafe-free ordered copy-on-write radix map with O(1) snapshots; optional lock-free concurrent variant. Extracted for filesystem-researches (in-DRAM metadata cache + on-disk backbone candidate)."
 

@@ -140,7 +140,7 @@ The read story is excellent; the **concurrent write story is the weak point**, a
 it is the *CoW wide-node clone*, not the radix idea. Mitigations if write
 throughput matters: (a) batch writes through the journal (an FS already does
 this) so the hot path is reads + bulk apply; (b) the prototype's **wait-free
-combining** write path (`../prototype/src/waitfree.rs`) which coalesces many
+combining** write path (`../archived_radix-fs-prototype/src/waitfree.rs`) which coalesces many
 writes per root swap; (c) shrink max node fanout or use partial-node persistence
 to cut per-insert clone cost. For a read-dominated, batch-written FS backbone,
 ConcurrentArt's profile (wait-free scalable reads + O(1) snapshots, slower

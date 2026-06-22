@@ -76,7 +76,7 @@ the backbone for `filesystem-researches`' LVIAARC write-back cache. Beyond
   `arc-swap` (one vetted crate; keeps the lock-free code `unsafe`-free).
 - A genuinely **wait-free *write*** path (per-shard flat combining, loom-checked)
   lives in the source prototype
-  (`../prototype/src/waitfree.rs`); this crate ships the lock-free write baseline,
+  (`../archived_radix-fs-prototype/src/waitfree.rs`); this crate ships the lock-free write baseline,
   which suits the in-DRAM cache use. Promote later if wait-free writes are needed.
 - The full FS stack (in-key snapshots + journal durability) is in
-  `../prototype/src/concurrent.rs`; this crate is just the reusable map layer.
+  `../archived_radix-fs-prototype/src/concurrent.rs`; this crate is just the reusable map layer.
