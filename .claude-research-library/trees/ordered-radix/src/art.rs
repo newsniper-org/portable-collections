@@ -206,11 +206,25 @@ fn grow48_to_256<V: Clone>(index: &[u8], kids: &[Arc<Node<V>>]) -> Children<V> {
     Children::N256 { kids: nkids }
 }
 
-fn insert_rec<V: Clone>(node: &Arc<Node<V>>, key: &[u8], depth: usize, value: V) -> Arc<Node<V>> {
+/// CoW insert with a caller-chosen leaf-replacement policy `replace(existing,
+/// new) -> bool`. Returns `None` when the insert is a no-op (existing key whose
+/// `replace` says keep) — the basis for monotone (seq-gated) apply. A split for
+/// a *new* key always applies.
+fn insert_rec_with<V: Clone, R: Fn(&V, &V) -> bool>(
+    node: &Arc<Node<V>>,
+    key: &[u8],
+    depth: usize,
+    value: V,
+    replace: &R,
+) -> Option<Arc<Node<V>>> {
     match &**node {
-        Node::Leaf { key: lk, .. } => {
+        Node::Leaf { key: lk, value: lv } => {
             if lk.as_slice() == key {
-                return Arc::new(Node::Leaf { key: lk.clone(), value });
+                return if replace(lv, &value) {
+                    Some(Arc::new(Node::Leaf { key: lk.clone(), value }))
+                } else {
+                    None
+                };
             }
             let common = common_prefix_len(&lk[depth..], &key[depth..]);
             let d = depth + common;
@@ -220,7 +234,7 @@ fn insert_rec<V: Clone>(node: &Arc<Node<V>>, key: &[u8], depth: usize, value: V)
                 key[d],
                 Arc::new(Node::Leaf { key: key.to_vec(), value }),
             );
-            Arc::new(Node::Inner { prefix: lk[depth..d].to_vec(), children })
+            Some(Arc::new(Node::Inner { prefix: lk[depth..d].to_vec(), children }))
         }
         Node::Inner { prefix, children } => {
             let common = common_prefix_len(prefix, &key[depth..]);
@@ -232,17 +246,29 @@ fn insert_rec<V: Clone>(node: &Arc<Node<V>>, key: &[u8], depth: usize, value: V)
                 });
                 let new_leaf = Arc::new(Node::Leaf { key: key.to_vec(), value });
                 let ch = Children::new_pair(prefix[common], shortened, key[depth + common], new_leaf);
-                return Arc::new(Node::Inner { prefix: prefix[..common].to_vec(), children: ch });
+                return Some(Arc::new(Node::Inner { prefix: prefix[..common].to_vec(), children: ch }));
             }
             let d = depth + prefix.len();
             let byte = key[d];
-            let ch = match children.get(byte) {
-                Some(child) => children.replaced(byte, insert_rec(child, key, d + 1, value)),
-                None => children.added(byte, Arc::new(Node::Leaf { key: key.to_vec(), value })),
-            };
-            Arc::new(Node::Inner { prefix: prefix.clone(), children: ch })
+            match children.get(byte) {
+                Some(child) => match insert_rec_with(child, key, d + 1, value, replace) {
+                    Some(nc) => Some(Arc::new(Node::Inner {
+                        prefix: prefix.clone(),
+                        children: children.replaced(byte, nc),
+                    })),
+                    None => None,
+                },
+                None => {
+                    let ch = children.added(byte, Arc::new(Node::Leaf { key: key.to_vec(), value }));
+                    Some(Arc::new(Node::Inner { prefix: prefix.clone(), children: ch }))
+                }
+            }
         }
     }
+}
+
+fn insert_rec<V: Clone>(node: &Arc<Node<V>>, key: &[u8], depth: usize, value: V) -> Arc<Node<V>> {
+    insert_rec_with(node, key, depth, value, &|_, _| true).expect("plain insert always produces a node")
 }
 
 fn children_clone<V: Clone>(c: &Children<V>) -> Children<V> {
@@ -526,23 +552,27 @@ mod tests {
     }
 }
 
-// ---- concurrent ART (lock-free), closing criterion (B)6 ----
+// ---- concurrent, seq-stamped ART backbone (lock-free) ----
+// Closes criterion (B)6 (lock-free node-type growth) AND the LVIAARC interface:
+// values carry an `op_seq` for monotone apply (FIX2), plus a public batch-apply
+// (sorted ops -> one root transition per shard) and per-key / integrated
+// generation queries.
 #[cfg(feature = "concurrent")]
-pub use conc::ConcurrentArt;
+pub use conc::{ArtSnapshot, ConcurrentArt};
 
 #[cfg(feature = "concurrent")]
 mod conc {
-    use super::{get_rec, insert_rec, Node};
+    use super::{get_rec, insert_rec_with, Node};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
     use arc_swap::ArcSwapOption;
 
-    fn insert_into<V: Clone>(root: &Option<Arc<Node<V>>>, key: &[u8], value: V) -> Arc<Node<V>> {
-        match root {
-            None => Arc::new(Node::Leaf { key: key.to_vec(), value }),
-            Some(r) => insert_rec(r, key, 0, value),
-        }
-    }
+    // Each value is `(op_seq, V)`; apply is monotone (a write lands only if its
+    // op_seq exceeds the resident one) — this is the FS prototype's FIX2.
+    type Root<V> = Option<Arc<Node<(u64, V)>>>;
+    type Slot<V> = ArcSwapOption<Node<(u64, V)>>;
 
     fn shard_of(key: &[u8], prefix: usize, n: usize) -> usize {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -553,39 +583,109 @@ mod conc {
         (h % n as u64) as usize
     }
 
-    /// Lock-free concurrent Adaptive Radix Tree (CoW root swap). Demonstrates
-    /// that ART's adaptive node-type growth (N4→16→48→256), being a pure CoW
-    /// **node replacement**, composes with an atomic-`Arc` root unchanged:
-    /// **wait-free reads, lock-free writes, `Arc` reclamation** — exactly as the
-    /// naive `ConcurrentRadixMap`, but now with ART's shallow depth + low memory.
+    /// Monotone CoW insert into a (possibly empty) shard root. Returns `None` if
+    /// the write is superseded (resident op_seq >= new) — a no-op.
+    fn insert_mono<V: Clone>(root: &Root<V>, key: &[u8], value: V, seq: u64) -> Root<V> {
+        match root {
+            None => Some(Arc::new(Node::Leaf { key: key.to_vec(), value: (seq, value) })),
+            Some(r) => insert_rec_with(r, key, 0, (seq, value), &|o: &(u64, V), n: &(u64, V)| n.0 > o.0),
+        }
+    }
+
+    /// Lock-free, seq-stamped concurrent Adaptive Radix Tree — the LVIAARC
+    /// backbone. ART node-type growth (N4→16→48→256) is a pure CoW **node
+    /// replacement**, so every write (single or batched) commits as one atomic
+    /// root CAS per shard: **wait-free reads, lock-free writes, Arc reclamation,
+    /// SMO-free**.
     pub struct ConcurrentArt<V> {
-        shards: Vec<ArcSwapOption<Node<V>>>,
+        shards: Vec<Slot<V>>,
         prefix: usize,
+        seq_gen: AtomicU64,
+        max_seq: AtomicU64,
     }
 
     impl<V: Clone> ConcurrentArt<V> {
+        /// `shard_prefix` = leading key bytes used to pick a shard (e.g. 8 = inode).
         pub fn new(shard_count: usize, shard_prefix: usize) -> Self {
             assert!(shard_count >= 1 && shard_prefix >= 1);
             ConcurrentArt {
                 shards: (0..shard_count).map(|_| ArcSwapOption::empty()).collect(),
                 prefix: shard_prefix,
+                seq_gen: AtomicU64::new(1),
+                max_seq: AtomicU64::new(0),
             }
         }
 
-        /// Lock-free insert. ART node-type growth happens inside the path-copy and
-        /// is published by the single root CAS — no in-place mutation, no SMO.
+        fn slot(&self, key: &[u8]) -> &Slot<V> {
+            &self.shards[shard_of(key, self.prefix, self.shards.len())]
+        }
+
+        /// Convenience insert (auto op_seq, monotone last-writer-wins).
         pub fn insert(&self, key: &[u8], value: V) {
-            let s = &self.shards[shard_of(key, self.prefix, self.shards.len())];
-            s.rcu(|cur| Some(insert_into(cur, key, value.clone())));
+            let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
+            self.apply(key, value, seq);
+        }
+
+        /// **Apply** one op with a caller-supplied `op_seq` (monotone — FIX2). The
+        /// caller (e.g. LVIAARC) owns the op-sequence space; the backbone only
+        /// requires it be monotonic per key.
+        pub fn apply(&self, key: &[u8], value: V, op_seq: u64) {
+            self.slot(key)
+                .rcu(|cur| insert_mono(cur, key, value.clone(), op_seq).or_else(|| cur.clone()));
+            self.max_seq.fetch_max(op_seq, Ordering::Relaxed);
+        }
+
+        /// **Batch-apply** (the LVIAARC flush primitive): fold a whole `(key,
+        /// value, op_seq)` batch into **one root transition per shard** — the
+        /// public generalization of the prototype's `help` combine. Atomic
+        /// per shard (one CAS), monotone, order-independent.
+        pub fn apply_batch(&self, ops: &[(Vec<u8>, V, u64)]) {
+            if ops.is_empty() {
+                return;
+            }
+            let n = self.shards.len();
+            let mut by_shard: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+            let mut maxseq = 0u64;
+            for (i, (k, _, seq)) in ops.iter().enumerate() {
+                by_shard[shard_of(k, self.prefix, n)].push(i);
+                maxseq = maxseq.max(*seq);
+            }
+            for (sh, idxs) in by_shard.iter().enumerate() {
+                if idxs.is_empty() {
+                    continue;
+                }
+                self.shards[sh].rcu(|cur| {
+                    let mut root = cur.clone();
+                    for &i in idxs {
+                        let (k, v, seq) = &ops[i];
+                        if let Some(nr) = insert_mono(&root, k, v.clone(), *seq) {
+                            root = Some(nr);
+                        }
+                    }
+                    root
+                });
+            }
+            self.max_seq.fetch_max(maxseq, Ordering::Relaxed);
         }
 
         /// Wait-free point read.
         pub fn get(&self, key: &[u8]) -> Option<V> {
-            let root = self.shards[shard_of(key, self.prefix, self.shards.len())].load_full();
-            root.and_then(|r| get_rec(&r, key, 0).cloned())
+            self.slot(key).load_full().and_then(|r| get_rec(&r, key, 0).map(|(_, v)| v.clone()))
         }
 
-        /// O(shards) immutable snapshot (capture each shard root).
+        /// Per-key **integrated generation**: the `op_seq` under which `key` is in
+        /// the backbone (LVIAARC's recovery dominance query). `None` if absent.
+        pub fn key_seq(&self, key: &[u8]) -> Option<u64> {
+            self.slot(key).load_full().and_then(|r| get_rec(&r, key, 0).map(|(s, _)| *s))
+        }
+
+        /// Coarse integrated generation: max `op_seq` ever applied (fast-path
+        /// "is everything up to seq S already in the backbone?").
+        pub fn integrated_generation(&self) -> u64 {
+            self.max_seq.load(Ordering::Relaxed)
+        }
+
+        /// O(shards) immutable snapshot.
         pub fn snapshot(&self) -> ArtSnapshot<V> {
             ArtSnapshot {
                 roots: self.shards.iter().map(|s| s.load_full()).collect(),
@@ -595,14 +695,14 @@ mod conc {
     }
 
     pub struct ArtSnapshot<V> {
-        roots: Vec<Option<Arc<Node<V>>>>,
+        roots: Vec<Root<V>>,
         prefix: usize,
     }
 
     impl<V: Clone> ArtSnapshot<V> {
         pub fn get(&self, key: &[u8]) -> Option<V> {
             let idx = shard_of(key, self.prefix, self.roots.len());
-            self.roots[idx].as_ref().and_then(|r| get_rec(r, key, 0).cloned())
+            self.roots[idx].as_ref().and_then(|r| get_rec(r, key, 0).map(|(_, v)| v.clone()))
         }
     }
 }

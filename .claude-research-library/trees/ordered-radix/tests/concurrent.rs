@@ -124,3 +124,75 @@ fn concurrent_art_node_growth_and_snapshot() {
     // snapshot get returns a valid (written) value
     assert!(snap.get(&k(0, 0)).is_some());
 }
+
+// ---- LVIAARC interface: batch-apply + monotone seq + generation queries ----
+
+#[test]
+fn art_batch_apply_equals_sequential_and_generation() {
+    use ordered_radix::ConcurrentArt;
+    let m = ConcurrentArt::<u64>::new(16, 8);
+    // A flush batch: (key, value, op_seq). Includes an out-of-order + a stale dup.
+    let batch: Vec<(Vec<u8>, u64, u64)> = vec![
+        (k(1, 10).to_vec(), 100, 5),
+        (k(1, 20).to_vec(), 200, 6),
+        (k(2, 10).to_vec(), 300, 7),
+        (k(1, 10).to_vec(), 999, 3), // stale (seq 3 < 5) -> must NOT overwrite
+    ];
+    m.apply_batch(&batch);
+    assert_eq!(m.get(&k(1, 10)), Some(100)); // stale dup ignored (monotone)
+    assert_eq!(m.get(&k(1, 20)), Some(200));
+    assert_eq!(m.get(&k(2, 10)), Some(300));
+    // per-key integrated generation
+    assert_eq!(m.key_seq(&k(1, 10)), Some(5));
+    assert_eq!(m.key_seq(&k(2, 10)), Some(7));
+    assert_eq!(m.key_seq(&k(9, 9)), None);
+    // coarse integrated generation = max applied seq
+    assert_eq!(m.integrated_generation(), 7);
+
+    // apply a newer write to (1,10) -> wins; older -> ignored
+    m.apply(&k(1, 10), 111, 9);
+    assert_eq!(m.get(&k(1, 10)), Some(111));
+    assert_eq!(m.key_seq(&k(1, 10)), Some(9));
+    m.apply(&k(1, 10), 222, 4); // older -> no-op
+    assert_eq!(m.get(&k(1, 10)), Some(111));
+    assert_eq!(m.integrated_generation(), 9);
+}
+
+#[test]
+fn art_concurrent_batch_apply_threads() {
+    use ordered_radix::ConcurrentArt;
+    let threads = 8;
+    let per = 4_000u64;
+    let map = Arc::new(ConcurrentArt::<u64>::new(64, 8));
+    let barrier = Arc::new(Barrier::new(threads));
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let map = Arc::clone(&map);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                // each thread flushes batches of 32 ops (its own inode, unique seqs)
+                let mut chunk: Vec<(Vec<u8>, u64, u64)> = Vec::new();
+                for i in 0..per {
+                    let seq = (t as u64) << 40 | i; // per-thread monotone seq space
+                    chunk.push((k(t as u64, i).to_vec(), i, seq));
+                    if chunk.len() == 32 {
+                        map.apply_batch(&chunk);
+                        chunk.clear();
+                    }
+                }
+                if !chunk.is_empty() {
+                    map.apply_batch(&chunk);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    for t in 0..threads as u64 {
+        for i in (0..per).step_by(83) {
+            assert_eq!(map.get(&k(t, i)), Some(i), "batch-applied key missing");
+        }
+    }
+}

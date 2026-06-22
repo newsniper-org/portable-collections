@@ -51,6 +51,23 @@ cargo test --features concurrent # + real-threads lock-free tests
 `#![no_std]` except under `cfg(test)` and the `concurrent` feature, which need
 `std` for the test harness / `arc-swap`).
 
+## LVIAARC backbone interface (concurrent ART)
+
+`ConcurrentArt` (the `--features concurrent` lock-free, **seq-stamped** ART) is
+the backbone for `filesystem-researches`' LVIAARC write-back cache. Beyond
+`insert`/`get`/`snapshot` it exposes the thin cache-facing contract:
+
+- `apply(key, value, op_seq)` — monotone apply (a write lands only if `op_seq`
+  exceeds the resident one; the caller owns the op-sequence space — only per-key
+  monotonicity is required).
+- `apply_batch(&[(key, value, op_seq)])` — **fold a flush batch into one root
+  transition per shard** (atomic, monotone, order-independent) — the LVIAARC
+  flush primitive (public generalization of the prototype's wait-free `help`).
+- `key_seq(key) -> Option<u64>` — per-key integrated generation (recovery
+  dominance query); `integrated_generation() -> u64` — coarse max applied seq.
+- node-type growth (N4→256) is a CoW **node replacement**, so batches commit
+  SMO-free as a single root CAS — wait-free reads, lock-free writes preserved.
+
 ## Notes & scope
 
 - The **persistent core is zero-dep**; only the `concurrent` feature pulls
