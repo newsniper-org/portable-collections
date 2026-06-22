@@ -17,9 +17,25 @@ default = ["alloc"]
 alloc = ["portable-collection-primitives/alloc"]
 std = ["portable-collection-primitives/std"]
 unstable = ["portable-collection-primitives/unstable"]
+# Lock-free concurrent radix maps (`ConcurrentRadixMap` / `ConcurrentArt`): the
+# CoW structure with an atomic-`Arc` root via `arc-swap` (wait-free reads,
+# lock-free writes, `Arc`-refcount reclamation, still `unsafe`-free). Pulls
+# `std` (threads + arc-swap) — the in-DRAM metadata-cache use case.
+concurrent = ["std", "dep:arc-swap"]
 
 [dependencies]
 portable-collection-primitives = { workspace = true, default-features = false }
+arc-swap = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "radix_bench"
+path = "examples/radix_bench.rs"
+
+# Concurrent ART throughput micro-benchmark (needs the `concurrent` feature; the
+# example compiles without it via a `cfg`-gated stub `main`).
+[[example]]
+name = "radix_cbench"
+path = "examples/radix_cbench.rs"

@@ -6,8 +6,10 @@ members = ["portable-bijectives", "portable-maps-and-sets", "portable-queues", "
 # these with `field.workspace = true` in their own `[package]`.
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.77"
+edition = "2024"
+# Project-wide toolchain floor (channel-agnostic MSRV). edition 2024 needs ≥1.85;
+# we set the bar higher at 1.96 for the whole workspace.
+rust-version = "1.96"
 license = "Apache-2.0 OR MIT"
 repository = ""
 authors = ["윤병익 <yeun0908@gmail.com, newsniper@protonmail.com>"]
@@ -23,3 +25,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(toolchain_channel, values(
 portable-collection-primitives = { path = "./portable-collection-primitives/", default-features = false }
 rustc_version = { version = "0.4" }
 criterion = { version = "0.5.1", features = ["cargo_bench_support", "plotters", "csv", "csv_output", "html_reports", "stable"] }
+# Lock-free atomic-`Arc` swap with a safe API — backs the optional `concurrent`
+# radix maps in portable-maps-and-sets (keeps the lock-free code `unsafe`-free).
+arc-swap = { version = "1" }

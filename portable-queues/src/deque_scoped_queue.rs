@@ -35,14 +35,14 @@ ifstdoralloc!({
         items: VecDeque<T>,
         /// Total items ever pushed — the checkpoint mark space. `pull` does NOT
         /// decrement it (pull is a front-consume, not a push-rollback).
-        gen: usize,
+        generation: usize,
     }
 
     impl<T> DequeScopedQueue<T> {
         /// Create an empty queue.
         #[must_use]
         pub const fn new() -> Self {
-            Self { items: VecDeque::new(), gen: 0 }
+            Self { items: VecDeque::new(), generation: 0 }
         }
 
         /// Iterate the live items in FIFO (front-to-back) order.
@@ -60,7 +60,7 @@ ifstdoralloc!({
     impl<T> Container for DequeScopedQueue<T> {
         fn clear(&mut self) {
             self.items.clear();
-            self.gen = 0;
+            self.generation = 0;
         }
         fn len(&self) -> usize {
             self.items.len()
@@ -70,7 +70,7 @@ ifstdoralloc!({
     impl<T> Push<T> for DequeScopedQueue<T> {
         fn push(&mut self, item: T) {
             self.items.push_back(item);
-            self.gen += 1;
+            self.generation += 1;
         }
     }
 
@@ -87,20 +87,20 @@ ifstdoralloc!({
         type Mark = Checkpoint;
 
         fn checkpoint(&self) -> Checkpoint {
-            Checkpoint::from_len(self.gen)
+            Checkpoint::from_len(self.generation)
         }
 
         fn rollback_to(&mut self, mark: Checkpoint) {
             let target = mark.as_len();
             // Drop pushes made after the mark, from the back. Overshoot (target
-            // at/beyond gen) is a no-op.
-            while self.gen > target {
+            // at/beyond generation) is a no-op.
+            while self.generation > target {
                 if self.items.pop_back().is_some() {
-                    self.gen -= 1;
+                    self.generation -= 1;
                 } else {
                     // Back is empty before reaching target → the scope's pushes
                     // were already pulled; resync the counter and stop.
-                    self.gen = target;
+                    self.generation = target;
                     break;
                 }
             }
@@ -110,8 +110,8 @@ ifstdoralloc!({
     impl<T> ScopedQueue<T> for DequeScopedQueue<T> {
         fn drain_since(&mut self, mark: Checkpoint) -> impl Iterator<Item = T> + '_ {
             let target = mark.as_len();
-            let n = self.gen.saturating_sub(target).min(self.items.len());
-            self.gen -= n;
+            let n = self.generation.saturating_sub(target).min(self.items.len());
+            self.generation -= n;
             let start = self.items.len() - n;
             // `VecDeque::drain` yields front-to-back, i.e. the scope suffix in
             // push (FIFO) order.
