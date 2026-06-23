@@ -13,7 +13,7 @@ ifstd!({
 });
 
 ifstdoralloc!({
-    use portable_collection_primitives::{Checkpoint, Container, ScopedRollback, ScopedStack, Push, Pop};
+    use portable_collection_primitives::{Checkpoint, Container, ScopedRollback, ScopedStack, Push, Pop, Clearable};
 
     /// A `Vec`-backed append-only log with scope checkpoint/rollback — the
     /// canonical [`ScopedStack`] implementation. `push` appends; `checkpoint` marks
@@ -65,11 +65,14 @@ ifstdoralloc!({
     }
 
     impl<T> Container for VecScopedStack<T> {
-        fn clear(&mut self) {
-            self.items.clear();
-        }
         fn len(&self) -> usize {
             self.items.len()
+        }
+    }
+
+    impl<T> Clearable for VecScopedStack<T> {
+        fn clear(&mut self) {
+            self.items.clear();
         }
     }
 

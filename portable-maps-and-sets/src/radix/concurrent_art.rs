@@ -10,7 +10,8 @@
 //! atomic root CAS per shard: **wait-free reads, lock-free writes, Arc
 //! reclamation, SMO-free**.
 //!
-//! `concurrent` implies `std`, so this module is always compiled on the std tier.
+//! `concurrent` needs only `alloc` (`arc-swap` is `no_std`-capable); this module
+//! compiles on the `no_std` + `alloc` tier (threaded tests sit behind `concurrent-std`).
 
 use super::art::{get_rec, insert_rec_with, Node};
 use alloc::sync::Arc;

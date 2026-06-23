@@ -18,6 +18,7 @@
 //! Keys must be **non-prefix-free** (no key a prefix of another) — fixed-width
 //! keys, as the FS uses, satisfy this. Values are `V: Clone`.
 
+use portable_collection_primitives::{MapReadShim, MapRefKeyInsertShim};
 use portable_collection_primitives::ifstd;
 
 ifstd!({
@@ -32,9 +33,9 @@ ifstd!({
     });
 });
 
-use portable_collection_primitives::Container;
+use portable_collection_primitives::{Container, Clearable};
 
-use super::traits::{OrderedMap, SnapshotMap};
+use portable_collection_primitives::{OrderedMap, SnapshotMap};
 
 // `pub(super)` so the concurrent ART (`concurrent_art.rs`, a sibling module
 // under `radix`) can reuse the node type and the two recursive helpers.
@@ -118,6 +119,25 @@ impl<V> Children<V> {
             Children::N16 { .. } => 1,
             Children::N48 { .. } => 2,
             Children::N256 { .. } => 3,
+        }
+    }
+
+    /// The next `(byte, &child)` with `byte >= from`, ascending — the ordered
+    /// cursor the lazy range iterator pulls on. `from` is a `u16` so `from ==
+    /// 256` cleanly means "past the last byte" (→ `None`).
+    fn next_from(&self, from: u16) -> Option<(u8, &Arc<Node<V>>)> {
+        match self {
+            Children::N4 { keys, kids } | Children::N16 { keys, kids } => {
+                let i = keys.partition_point(|&k| u16::from(k) < from);
+                keys.get(i).map(|&b| (b, &kids[i]))
+            }
+            Children::N48 { index, kids } => (from..256).find_map(|b| {
+                let s = index[b as usize];
+                (s != 0).then(|| (b as u8, &kids[(s - 1) as usize]))
+            }),
+            Children::N256 { kids } => {
+                (from..256).find_map(|b| kids[b as usize].as_ref().map(|c| (b as u8, c)))
+            }
         }
     }
 }
@@ -320,33 +340,12 @@ pub(super) fn get_rec<'a, V>(node: &'a Node<V>, key: &[u8], depth: usize) -> Opt
     }
 }
 
-fn collect<V: Clone>(node: &Node<V>, path: &mut Vec<u8>, lo: &[u8], hi: &[u8], out: &mut Vec<(Vec<u8>, V)>) {
-    match node {
-        Node::Leaf { key, value } => {
-            if key.as_slice() >= lo && key.as_slice() <= hi {
-                out.push((key.clone(), value.clone()));
-            }
-        }
-        Node::Inner { prefix, children } => {
-            let base = path.len();
-            path.extend_from_slice(prefix);
-            children.for_each(|byte, child| {
-                path.push(byte);
-                let len = path.len();
-                if !(path.as_slice() < &lo[..len.min(lo.len())] || path.as_slice() > &hi[..len.min(hi.len())]) {
-                    collect(child, path, lo, hi, out);
-                }
-                path.pop();
-            });
-            path.truncate(base);
-        }
-    }
-}
-
 /// Path-compressed adaptive radix tree (CoW, O(1) snapshots).
 ///
 /// ```
-/// use portable_maps_and_sets::radix::{ArtOrderedMap, OrderedMap, SnapshotMap};
+/// use portable_maps_and_sets::radix::{
+///     ArtOrderedMap, MapReadShim, MapRefKeyInsertShim, SnapshotMap,
+/// };
 ///
 /// fn k(a: u64, b: u64) -> [u8; 16] {
 ///     let mut x = [0u8; 16];
@@ -382,36 +381,6 @@ impl<V: Clone> ArtOrderedMap<V> {
     #[must_use]
     pub const fn new() -> Self {
         ArtOrderedMap { root: None, len: 0 }
-    }
-
-    /// Non-allocating ordered range visitor.
-    pub fn for_each_range<F: FnMut(&[u8], &V)>(&self, lo: &[u8], hi: &[u8], mut f: F) {
-        fn rec<V, F: FnMut(&[u8], &V)>(node: &Node<V>, path: &mut Vec<u8>, lo: &[u8], hi: &[u8], f: &mut F) {
-            match node {
-                Node::Leaf { key, value } => {
-                    if key.as_slice() >= lo && key.as_slice() <= hi {
-                        f(key, value);
-                    }
-                }
-                Node::Inner { prefix, children } => {
-                    let base = path.len();
-                    path.extend_from_slice(prefix);
-                    children.for_each(|byte, child| {
-                        path.push(byte);
-                        let len = path.len();
-                        if !(path.as_slice() < &lo[..len.min(lo.len())] || path.as_slice() > &hi[..len.min(hi.len())]) {
-                            rec(child, path, lo, hi, f);
-                        }
-                        path.pop();
-                    });
-                    path.truncate(base);
-                }
-            }
-        }
-        if let Some(r) = &self.root {
-            let mut path = Vec::new();
-            rec(r, &mut path, lo, hi, &mut f);
-        }
     }
 }
 
@@ -492,6 +461,142 @@ impl<V: Clone> ArtOrderedMap<V> {
 }
 
 impl<V: Clone> OrderedMap<V> for ArtOrderedMap<V> {
+    fn range_ref<'a>(&'a self, lo: &[u8], hi: &[u8]) -> impl Iterator<Item = (Vec<u8>, &'a V)>
+    where
+        V: 'a,
+    {
+        ArtRangeRef::new(self.root.as_deref(), lo, hi)
+    }
+
+    fn for_each_range<F: FnMut(&[u8], &V)>(&self, lo: &[u8], hi: &[u8], mut f: F) {
+        fn rec<V, F: FnMut(&[u8], &V)>(node: &Node<V>, path: &mut Vec<u8>, lo: &[u8], hi: &[u8], f: &mut F) {
+            match node {
+                Node::Leaf { key, value } => {
+                    if key.as_slice() >= lo && key.as_slice() <= hi {
+                        f(key, value);
+                    }
+                }
+                Node::Inner { prefix, children } => {
+                    let base = path.len();
+                    path.extend_from_slice(prefix);
+                    children.for_each(|byte, child| {
+                        path.push(byte);
+                        let len = path.len();
+                        if !(path.as_slice() < &lo[..len.min(lo.len())] || path.as_slice() > &hi[..len.min(hi.len())]) {
+                            rec(child, path, lo, hi, f);
+                        }
+                        path.pop();
+                    });
+                    path.truncate(base);
+                }
+            }
+        }
+        if let Some(r) = &self.root {
+            let mut path = Vec::new();
+            rec(r, &mut path, lo, hi, &mut f);
+        }
+    }
+
+    // `range` uses the trait default (clones `range_ref`).
+}
+
+/// Lazy in-order iterator over an [`ArtOrderedMap`] range `[lo, hi]`, yielding
+/// `(owned key, &value)`. Holds borrowed nodes — the tree outlives it via the
+/// `&self` borrow that produced it.
+pub struct ArtRangeRef<'a, V> {
+    lo: Vec<u8>,
+    hi: Vec<u8>,
+    /// Stack of inner nodes being iterated: `(inner node, next child-byte cursor,
+    /// base path length)`. `base` is the path length to truncate to when the node
+    /// is exhausted (drops both its compressed prefix and its incoming byte).
+    stack: Vec<(&'a Node<V>, u16, usize)>,
+    /// The byte path down the stack (prefixes + child bytes).
+    path: Vec<u8>,
+    /// The root, visited once on the first `next()` (bootstrap).
+    pending: Option<&'a Node<V>>,
+}
+
+impl<'a, V> ArtRangeRef<'a, V> {
+    fn new(root: Option<&'a Node<V>>, lo: &[u8], hi: &[u8]) -> Self {
+        ArtRangeRef {
+            lo: lo.to_vec(),
+            hi: hi.to_vec(),
+            stack: Vec::new(),
+            path: Vec::new(),
+            pending: root,
+        }
+    }
+
+    /// Descend into `node`; its incoming byte (if any) is already on `path` at
+    /// length `fork`. An in-range **leaf** yields its item (and the incoming byte
+    /// is dropped, since a leaf gets no frame); an **inner** node pushes a frame
+    /// (extending its compressed prefix). Otherwise `None`.
+    fn enter(&mut self, node: &'a Node<V>, fork: usize) -> Option<(Vec<u8>, &'a V)> {
+        match node {
+            Node::Leaf { key, value } => {
+                self.path.truncate(fork);
+                if key.as_slice() >= self.lo.as_slice() && key.as_slice() <= self.hi.as_slice() {
+                    Some((key.clone(), value))
+                } else {
+                    None
+                }
+            }
+            Node::Inner { prefix, .. } => {
+                self.path.extend_from_slice(prefix);
+                self.stack.push((node, 0, fork));
+                None
+            }
+        }
+    }
+}
+
+impl<'a, V> Iterator for ArtRangeRef<'a, V> {
+    type Item = (Vec<u8>, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Bootstrap: visit the root once.
+        if let Some(root) = self.pending.take()
+            && let Some(item) = self.enter(root, 0)
+        {
+            return Some(item);
+        }
+        loop {
+            let depth = self.stack.len();
+            if depth == 0 {
+                return None;
+            }
+            let (node, cursor, base) = {
+                let top = &self.stack[depth - 1];
+                (top.0, top.1, top.2)
+            };
+            let Node::Inner { children, .. } = node else {
+                self.stack.pop(); // defensive: only inner nodes are pushed
+                continue;
+            };
+            if let Some((b, child)) = children.next_from(cursor) {
+                self.stack[depth - 1].1 = u16::from(b) + 1;
+                let fork = self.path.len();
+                self.path.push(b);
+                let len = self.path.len();
+                let out_of_range = self.path.as_slice() < &self.lo[..len.min(self.lo.len())]
+                    || self.path.as_slice() > &self.hi[..len.min(self.hi.len())];
+                if out_of_range {
+                    self.path.pop();
+                    continue;
+                }
+                let child: &'a Node<V> = child; // &Arc<Node> -> &Node (deref coercion)
+                if let Some(item) = self.enter(child, fork) {
+                    return Some(item);
+                }
+            } else {
+                self.path.truncate(base);
+                self.stack.pop();
+            }
+        }
+    }
+}
+
+impl<V: Clone> MapRefKeyInsertShim<[u8], V> for ArtOrderedMap<V> {
     fn insert(&mut self, key: &[u8], value: V) -> Option<V> {
         let old = self.get(key).cloned();
         self.root = Some(match &self.root {
@@ -503,22 +608,18 @@ impl<V: Clone> OrderedMap<V> for ArtOrderedMap<V> {
         }
         old
     }
+    
+}
 
+
+
+impl<V: Clone> MapReadShim<[u8], V> for ArtOrderedMap<V> {
     fn get(&self, key: &[u8]) -> Option<&V> {
         self.root.as_ref().and_then(|r| get_rec(r, key, 0))
     }
 
-    fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Vec<u8>, V)> {
-        let mut out = Vec::new();
-        if let Some(r) = &self.root {
-            let mut path = Vec::new();
-            collect(r, &mut path, lo, hi, &mut out);
-        }
-        out
-    }
-
-    fn len(&self) -> usize {
-        self.len
+    fn contains_key(&self, key: &[u8]) -> bool {
+        self.get(key).is_some()
     }
 }
 
@@ -534,14 +635,16 @@ impl<V: Clone> SnapshotMap<V> for ArtOrderedMap<V> {
 }
 
 impl<V: Clone> Container for ArtOrderedMap<V> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<V: Clone> Clearable for ArtOrderedMap<V> {
     /// Reset to empty — writes root and `len` together (the shared invariant).
     fn clear(&mut self) {
         self.root = None;
         self.len = 0;
-    }
-
-    fn len(&self) -> usize {
-        self.len
     }
 }
 
@@ -549,6 +652,7 @@ impl<V: Clone> Container for ArtOrderedMap<V> {
 mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
+    use portable_collection_primitives::{MapReadShim, MapRefKeyInsertShim};
 
     fn k(a: u64, b: u64) -> [u8; 16] {
         let mut x = [0u8; 16];
@@ -565,7 +669,7 @@ mod tests {
         assert_eq!(m.insert(&k(1, 1), 99), Some(10));
         assert_eq!(m.get(&k(1, 1)), Some(&99));
         assert_eq!(m.get(&k(9, 9)), None);
-        assert_eq!(OrderedMap::len(&m), 2);
+        assert_eq!(Container::len(&m), 2);
     }
 
     #[test]
@@ -586,10 +690,30 @@ mod tests {
         m.insert(&k(1, 1), 1);
         m.insert(&k(2, 2), 2);
         assert_eq!(Container::len(&m), 2);
-        Container::clear(&mut m);
+        Clearable::clear(&mut m);
         assert_eq!(Container::len(&m), 0);
         assert!(Container::is_empty(&m));
         assert_eq!(m.get(&k(1, 1)), None);
+    }
+
+    #[test]
+    fn range_ref_lazy_ordered_and_pruned() {
+        let mut m: ArtOrderedMap<u32> = ArtOrderedMap::new();
+        // Three inodes; range over the middle inode must skip the others.
+        for (a, b, v) in [(1u64, 5u64, 15u32), (2, 9, 29), (2, 1, 21), (2, 7, 27), (3, 0, 30)] {
+            m.insert(&k(a, b), v);
+        }
+        let lo = k(2, 0);
+        let hi = k(2, u64::MAX);
+        // range_ref: lazy, borrows values, ascending, single-inode after pruning.
+        let got: Vec<u32> = m.range_ref(&lo, &hi).map(|(_, v)| *v).collect();
+        assert_eq!(got, [21, 27, 29]); // ascending by the second key word
+        // lazy first element without materializing the rest.
+        assert_eq!(m.range_ref(&lo, &hi).next().map(|(_, v)| *v), Some(21));
+        // for_each_range agrees.
+        let mut seen = Vec::new();
+        m.for_each_range(&lo, &hi, |_, v| seen.push(*v));
+        assert_eq!(seen, [21, 27, 29]);
     }
 
     #[test]
@@ -608,11 +732,11 @@ mod tests {
         for (key, v) in &bt {
             assert_eq!(art.get(key), Some(v), "lookup mismatch");
         }
-        assert_eq!(OrderedMap::len(&art), bt.len());
+        assert_eq!(Container::len(&art), bt.len());
         // range (one inode) matches BTreeMap
         let lo = k(2, 0);
         let hi = k(2, u64::MAX);
-        let mut a: Vec<u64> = art.range(&lo, &hi).into_iter().map(|(_, v)| v).collect();
+        let mut a: Vec<u64> = art.range(&lo, &hi).map(|(_, v)| v).collect();
         let mut b: Vec<u64> = bt.range(lo..=hi).map(|(_, v)| *v).collect();
         a.sort_unstable();
         b.sort_unstable();

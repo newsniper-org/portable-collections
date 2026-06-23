@@ -60,7 +60,7 @@ impl DenseIndex for usize {
 }
 
 ifstdoralloc!({
-    use portable_collection_primitives::{Checkpoint, ScopedRollback, Bimap, Container};
+    use portable_collection_primitives::{Checkpoint, ScopedRollback, Bimap, Container, Clearable};
     use crate::InsertError;
 
     /// A bijection `K ↔ V` for **dense integer** keys/values, backed by direct-
@@ -235,10 +235,13 @@ ifstdoralloc!({
         }
     }
 
-    impl<K: DenseIndex, V: DenseIndex> Container for FlatRadixBimap<K, V> {
+    impl<K: DenseIndex, V: DenseIndex> Clearable for FlatRadixBimap<K, V> {
         fn clear(&mut self) {
             FlatRadixBimap::clear(self);
         }
+    }
+
+    impl<K: DenseIndex, V: DenseIndex> Container for FlatRadixBimap<K, V> {
         fn len(&self) -> usize {
             FlatRadixBimap::len(self)
         }
@@ -352,7 +355,7 @@ ifstdoralloc!({
 
         #[test]
         fn bimap_trait_path() {
-            use portable_collection_primitives::{Bimap, Container, ScopedRollback, Checkpoint};
+            use portable_collection_primitives::{Bimap, Clearable, Container, ScopedRollback, Checkpoint};
             let mut m: FlatRadixBimap<u32, u32> = FlatRadixBimap::new();
             Bimap::insert(&mut m, 1, 10).unwrap();
             Bimap::insert(&mut m, 2, 20).unwrap();
@@ -367,7 +370,7 @@ ifstdoralloc!({
             ScopedRollback::rollback_to(&mut m, mark);
             assert_eq!(Container::len(&m), 2);
             assert_eq!(Bimap::get_by_key(&m, &3), None);
-            Container::clear(&mut m);
+            Clearable::clear(&mut m);
             assert!(Container::is_empty(&m));
         }
     }

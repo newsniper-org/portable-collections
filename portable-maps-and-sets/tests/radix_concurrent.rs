@@ -81,7 +81,7 @@ fn per_inode_range_is_local_and_ordered() {
     map.insert(&k(43, 0), 100); // other inode, must be excluded
     let lo = k(42, 0);
     let hi = k(42, u64::MAX);
-    let got: Vec<u64> = map.range(&lo, &hi).into_iter().map(|(_, v)| v).collect();
+    let got: Vec<u64> = map.range(&lo, &hi).map(|(_, v)| v).collect();
     assert_eq!(got, vec![1, 3, 5, 7, 9]);
 }
 

@@ -31,13 +31,22 @@
 //! [`ShardedRadixOrderedMap`]: crate::radix::ShardedRadixOrderedMap
 //! [`ShardedArtOrderedMap`]: crate::radix::ShardedArtOrderedMap
 
+use portable_collection_primitives::{ifstdoralloc};
+
 mod art;
 mod cow;
-mod traits;
 
-pub use art::ArtOrderedMap;
-pub use cow::RadixOrderedMap;
-pub use traits::{OrderedMap, SnapshotMap};
+ifstdoralloc!({
+    // The role + facade traits the radix maps implement now live in the shared
+    // facade (`portable-collection-primitives`); re-export them so the maps are
+    // usable (`get`/`insert`/`clear`/`range`/`snapshot`) and their role traits
+    // reachable via `radix::…`, without a direct dependency on the facade crate.
+    pub use portable_collection_primitives::{
+        Clearable, Container, MapReadShim, MapRefKeyInsertShim, OrderedMap, SnapshotMap,
+    };
+    pub use art::ArtOrderedMap;
+    pub use cow::RadixOrderedMap;
+});
 
 #[cfg(feature = "concurrent")]
 mod concurrent;

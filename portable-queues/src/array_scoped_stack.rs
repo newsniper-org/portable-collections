@@ -2,7 +2,7 @@
 //! fixed inline array. The one `ScopedStack` impl that compiles without `alloc`.
 
 use portable_collection_primitives::{
-    Checkpoint, Container, Pop, Push, ScopedRollback, ScopedStack, TryPush,
+    Checkpoint, Container, Pop, Push, ScopedRollback, ScopedStack, TryPush, Clearable
 };
 
 /// A bare-`no_std`, no-allocator [`ScopedStack`] over a fixed-capacity inline
@@ -51,14 +51,17 @@ impl<T, const N: usize> Default for ArrayScopedStack<T, N> {
 }
 
 impl<T, const N: usize> Container for ArrayScopedStack<T, N> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<T, const N: usize> Clearable for ArrayScopedStack<T, N> {
     fn clear(&mut self) {
         for slot in &mut self.items[..self.len] {
             *slot = None;
         }
         self.len = 0;
-    }
-    fn len(&self) -> usize {
-        self.len
     }
 }
 

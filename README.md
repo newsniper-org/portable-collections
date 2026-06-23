@@ -30,16 +30,17 @@ Validate across all of them — each is a real target:
 | `alloc` *(default)* | *(none)* | `BTreeMap`/`Vec`/`VecDeque`-backed types, the `Map`/`Set` facade |
 | `std` | `--features std` | the `alloc` set + `std::error::Error` impls |
 | `unstable` | `--features unstable` | nightly-only extras (gated via a build-script channel probe) |
-| `concurrent` *(maps-and-sets only)* | `-p portable-maps-and-sets --features concurrent` | lock-free `ShardedRadixOrderedMap`/`ShardedArtOrderedMap` (atomic-`Arc` root via `arc-swap`; implies `std`) |
+| `concurrent` *(maps-and-sets only)* | `-p portable-maps-and-sets --features concurrent` | lock-free `ShardedRadixOrderedMap`/`ShardedArtOrderedMap` (atomic-`Arc` root via `arc-swap`; `no_std` + `alloc` — `arc-swap` is no_std-capable) |
+| `concurrent-std` *(maps-and-sets only)* | `--features concurrent-std` | `concurrent` + `std` (the threaded tests/examples) |
 
 ## Crates
 
 | crate | provides | status |
 |-------|----------|--------|
-| [`portable-collection-primitives`](portable-collection-primitives/) | the shared **trait vocabulary** — `Container`, `ScopedRollback` (+ `Checkpoint`), `Bimap`, `ScopedStack`/`ScopedQueue`, `Push`/`TryPush`/`Pop`/`Pull`, and the alloc-tier `Map`/`MapShim`/`Set`/`SetShim` facade — plus the cfg/codegen macros (`ifstd!`/`ifalloc!`/`ifstdoralloc!`, `group!`/`implgroup_for!`, `wrap_into_map_traits!`/`wrap_into_set_traits!`) | traits + macros (3 unit + 6 doc) |
+| [`portable-collection-primitives`](portable-collection-primitives/) | the shared **trait vocabulary** — `Container`, `ScopedRollback` (+ `Checkpoint`), `Bimap`, `ScopedStack`/`ScopedQueue`, `Push`/`TryPush`/`Pop`/`Pull`, the alloc-tier `Map`/`Set` facade, and the byte-keyed `OrderedMap`/`SnapshotMap` (range + snapshot) — plus the cfg/codegen macros (`ifstd!`/`ifalloc!`/`ifstdoralloc!`, `group!`/`implgroup_for!`, `wrap_into_map_traits!`/`wrap_into_set_traits!`) | traits + macros (3 unit + 6 doc) |
 | [`portable-bijectives`](portable-bijectives/) | `BTreeBimap<K, V>` and `FlatRadixBimap<K, V>` — 1-to-1 `K ↔ V` maps with insertion order and **atomic scope rollback** (`+ InsertError`, `DenseIndex`) | implemented + tested (18 unit + 2 doc) + criterion bench |
 | [`portable-queues`](portable-queues/) | scoped append-logs: `VecScopedStack` / `ArrayScopedStack` (LIFO `ScopedStack`) and `DequeScopedQueue` (FIFO `ScopedQueue`) — `checkpoint`/`rollback_to`/`drain_since` over a scope stack | implemented + tested (17 unit + 1 doc) |
-| [`portable-maps-and-sets`](portable-maps-and-sets/) | ordered **copy-on-write radix maps** with O(1) snapshots — `RadixOrderedMap` (byte-radix) and `ArtOrderedMap` (path-compressed adaptive radix); crate-local `OrderedMap`/`SnapshotMap` traits + `Container`; `--features concurrent` adds lock-free `ShardedRadixOrderedMap`/`ShardedArtOrderedMap` (atomic-`Arc` root via `arc-swap`) | implemented + tested (8 unit + 2 doc + 7 integration w/ `concurrent`) |
+| [`portable-maps-and-sets`](portable-maps-and-sets/) | ordered **copy-on-write radix maps** with O(1) snapshots — `RadixOrderedMap` (byte-radix) and `ArtOrderedMap` (path-compressed adaptive radix); implement the shared `OrderedMap`/`SnapshotMap` facade (`range` → iterator, `range_ref` lazy/borrowed, `for_each_range` zero-alloc) + `Container`/`Clearable`; `--features concurrent` (`no_std`+`alloc`) adds lock-free `ShardedRadixOrderedMap`/`ShardedArtOrderedMap` | implemented + tested (12 unit + 2 doc + 7 integration) |
 
 ### Trait hierarchy
 

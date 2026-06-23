@@ -16,8 +16,9 @@
 //! source prototype; this crate ships the lock-free baseline, which is the right
 //! fit for an in-DRAM metadata cache.
 //!
-//! `concurrent` implies `std`, so this module is always compiled on the std tier
-//! — its heap imports are unconditional.
+//! `concurrent` needs only `alloc` (`arc-swap` is `no_std`-capable), so this
+//! module compiles on the `no_std` + `alloc` tier; the std-using threaded
+//! tests/examples sit behind the `concurrent-std` superset feature.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -164,8 +165,8 @@ impl<V: Clone> ShardedRadixOrderedMap<V> {
     }
 
     /// Ordered range scan; single-shard when `lo`/`hi` share the shard prefix.
-    #[must_use]
-    pub fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Vec<u8>, V)> {
+    /// Returns an iterator of owned `(key, value)` pairs, ascending by key.
+    pub fn range(&self, lo: &[u8], hi: &[u8]) -> impl Iterator<Item = (Vec<u8>, V)> {
         let mut out = Vec::new();
         let p = self.shard_prefix.min(lo.len()).min(hi.len());
         if lo.len() >= p && hi.len() >= p && lo[..p] == hi[..p] {
@@ -178,7 +179,7 @@ impl<V: Clone> ShardedRadixOrderedMap<V> {
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
+        out.into_iter()
     }
 
     /// O(shards) immutable snapshot.
@@ -231,7 +232,7 @@ mod tests {
         for (k, v) in [(b"i5", 5u32), (b"i1", 1), (b"i3", 3)] {
             m.insert(k, v);
         }
-        let got: Vec<u32> = m.range(b"i0", b"i9").into_iter().map(|(_, v)| v).collect();
+        let got: Vec<u32> = m.range(b"i0", b"i9").map(|(_, v)| v).collect();
         assert_eq!(got, [1, 3, 5]);
     }
 }

@@ -66,7 +66,7 @@ ifstd!({
 
 
 ifstdoralloc!({
-    use portable_collection_primitives::{Checkpoint, ScopedRollback, Bimap, Container};
+    use portable_collection_primitives::{Checkpoint, ScopedRollback, Bimap, Container, Clearable};
 
     /// A scope-checkpointed bijection `K ↔ V` with an insertion-order log.
     ///
@@ -461,12 +461,16 @@ ifstdoralloc!({
 
     #[cfg(not(all(feature = "unstable", not(toolchain_channel = "stable"))))]
     impl<K, V> Container for BTreeBimap<K, V> {
+        fn len(&self) -> usize {
+            BTreeBimap::len(self)
+        }
+    }
+
+    #[cfg(not(all(feature = "unstable", not(toolchain_channel = "stable"))))]
+    impl<K, V> Clearable for BTreeBimap<K, V> {
         fn clear(&mut self) {
             // fwd + rev + order together.
             BTreeBimap::clear(self);
-        }
-        fn len(&self) -> usize {
-            BTreeBimap::len(self)
         }
     }
 
@@ -740,7 +744,7 @@ ifstdoralloc!({
 
         #[test]
         fn checkpoint_mark_agrees_with_inherent_and_trait_clear_empties() {
-            use portable_collection_primitives::{Checkpoint, Container};
+            use portable_collection_primitives::{Checkpoint, Clearable};
             let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
             m.insert(1, 10).unwrap();
             m.insert(2, 20).unwrap();
@@ -748,7 +752,7 @@ ifstdoralloc!({
             assert_eq!(m.checkpoint_mark(), Checkpoint::from_len(m.checkpoint()));
             // `clear` now lives on the `Container` supertrait; it still delegates
             // to the inherent clear (all three stores).
-            Container::clear(&mut m);
+            Clearable::clear(&mut m);
             assert!(m.is_empty());
             assert_eq!(m.get(&1), None);
             assert_eq!(m.get_key(&20), None);
@@ -759,7 +763,7 @@ ifstdoralloc!({
             // Exercises the `Bimap` facade end-to-end: lookups/insert/iter on
             // `Bimap`, len/is_empty/clear from the `Container` supertrait, and
             // checkpoint/rollback from the `ScopedRollback` supertrait.
-            use portable_collection_primitives::{Bimap, Container, ScopedRollback, Checkpoint};
+            use portable_collection_primitives::{Bimap, Clearable, ScopedRollback, Checkpoint};
             let mut m: BTreeBimap<u32, u32> = BTreeBimap::new();
             Bimap::insert(&mut m, 1, 10).unwrap();
             Bimap::insert(&mut m, 2, 20).unwrap();
@@ -779,7 +783,7 @@ ifstdoralloc!({
             assert_eq!(Container::len(&m), 2);
             assert_eq!(Bimap::get_by_key(&m, &3), None);
             // Container::clear empties every store.
-            Container::clear(&mut m);
+            Clearable::clear(&mut m);
             assert!(Container::is_empty(&m));
         }
     }

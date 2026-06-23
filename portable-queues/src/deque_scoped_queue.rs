@@ -14,7 +14,7 @@ ifstd!({
 });
 
 ifstdoralloc!({
-    use portable_collection_primitives::{Checkpoint, Container, Pull, Push, ScopedQueue, ScopedRollback};
+    use portable_collection_primitives::{Checkpoint, Container, Pull, Push, ScopedQueue, ScopedRollback, Clearable};
 
     /// A `VecDeque`-backed **FIFO** append-log with scope checkpoint/rollback — the
     /// queue-flavored sibling of `VecScopedStack`. [`push`](Push::push) appends at
@@ -58,12 +58,15 @@ ifstdoralloc!({
     }
 
     impl<T> Container for DequeScopedQueue<T> {
+        fn len(&self) -> usize {
+            self.items.len()
+        }
+    }
+
+    impl<T> Clearable for DequeScopedQueue<T> {
         fn clear(&mut self) {
             self.items.clear();
             self.generation = 0;
-        }
-        fn len(&self) -> usize {
-            self.items.len()
         }
     }
 

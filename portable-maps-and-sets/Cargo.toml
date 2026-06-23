@@ -17,11 +17,15 @@ default = ["alloc"]
 alloc = ["portable-collection-primitives/alloc"]
 std = ["portable-collection-primitives/std"]
 unstable = ["portable-collection-primitives/unstable"]
-# Lock-free concurrent radix maps (`ConcurrentRadixMap` / `ConcurrentArt`): the
-# CoW structure with an atomic-`Arc` root via `arc-swap` (wait-free reads,
-# lock-free writes, `Arc`-refcount reclamation, still `unsafe`-free). Pulls
-# `std` (threads + arc-swap) — the in-DRAM metadata-cache use case.
-concurrent = ["std", "dep:arc-swap"]
+# Lock-free concurrent radix maps (`ShardedRadixOrderedMap` /
+# `ShardedArtOrderedMap`): the CoW structure with an atomic-`Arc` root via
+# `arc-swap` (wait-free reads, lock-free writes, `Arc`-refcount reclamation, still
+# `unsafe`-free). `arc-swap` is itself `no_std`-capable, so the lock-free maps
+# need only `alloc` — usable in a `no_std` + `alloc` build.
+concurrent = ["alloc", "dep:arc-swap"]
+# `concurrent` plus `std` — the in-DRAM metadata-cache use case (the threaded
+# tests/examples). A convenience superset; the maps themselves are `no_std`.
+concurrent-std = ["concurrent", "std"]
 
 [dependencies]
 portable-collection-primitives = { workspace = true, default-features = false }
@@ -29,6 +33,10 @@ arc-swap = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[build-dependencies]
+rustc_version.workspace = true
+
 
 [[example]]
 name = "radix_bench"

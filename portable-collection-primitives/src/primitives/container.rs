@@ -9,8 +9,6 @@
 /// The minimal state any collection in this workspace exposes: the ability to
 /// empty it and to ask its size.
 pub trait Container {
-    /// Remove all entries.
-    fn clear(&mut self);
 
     /// The number of entries currently held.
     #[must_use]
@@ -21,4 +19,9 @@ pub trait Container {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+pub trait Clearable: Container {
+    /// Remove all entries.
+    fn clear(&mut self);
 }

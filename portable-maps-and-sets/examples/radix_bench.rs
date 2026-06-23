@@ -12,7 +12,8 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use portable_maps_and_sets::radix::{ArtOrderedMap, RadixOrderedMap, OrderedMap, SnapshotMap};
+use portable_collection_primitives::{Container,MapReadShim, MapRefKeyInsertShim};
+use portable_maps_and_sets::radix::{ArtOrderedMap, OrderedMap, RadixOrderedMap, SnapshotMap};
 
 const DIRS: u64 = 4_000;
 const PER_DIR: u64 = 64;
