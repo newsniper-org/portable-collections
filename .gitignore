@@ -1,5 +1,7 @@
-/target
-Cargo.lock
+**/target/
+**/Cargo.lock
 
 # Typst-rendered reports (regenerate with `typst compile benches/report.typ`)
 *.pdf
+
+.local-*-*/*
