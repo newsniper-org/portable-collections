@@ -23,15 +23,16 @@ ifstdoralloc!({
     /// Ordered copy-on-write **radix maps** with O(1) snapshots.
     ///
     /// A `no_std`, `unsafe`-free byte-keyed map family: a persistent
-    /// [`CowRadixMap`](radix::CowRadixMap), a path-compressed adaptive-radix
-    /// [`ArtCowMap`](radix::ArtCowMap), and (with `--features concurrent`) their
-    /// lock-free variants. See the module docs for the design rationale.
+    /// [`RadixOrderedMap`](radix::RadixOrderedMap), a path-compressed
+    /// adaptive-radix [`ArtOrderedMap`](radix::ArtOrderedMap), and (with
+    /// `--features concurrent`) their lock-free variants. See the module docs
+    /// for the design rationale.
     pub mod radix;
 
-    pub use radix::{ArtCowMap, CowRadixMap, OrderedMap, SnapshotMap};
+    pub use radix::{ArtOrderedMap, OrderedMap, RadixOrderedMap, SnapshotMap};
 });
 
 // The concurrent variants live behind the `concurrent` feature (which implies
 // `std`), so `radix` always exists when these re-exports are compiled.
 #[cfg(feature = "concurrent")]
-pub use radix::{ArtSnapshot, ConcurrentArt, ConcurrentRadixMap};
+pub use radix::{ShardedArtOrderedMap, ShardedArtSnapshot, ShardedRadixOrderedMap, ShardedRadixSnapshot};

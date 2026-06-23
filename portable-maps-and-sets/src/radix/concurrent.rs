@@ -1,6 +1,7 @@
-//! `ConcurrentRadixMap` — the lock-free concurrent CoW radix map (`--features
-//! concurrent`). Same immutable-node CoW structure as [`crate::radix::CowRadixMap`],
-//! but the root is an atomic `Arc` (`arc-swap`) so:
+//! `ShardedRadixOrderedMap` — the lock-free concurrent CoW radix map (`--features
+//! concurrent`). Same immutable-node CoW structure as
+//! [`crate::radix::RadixOrderedMap`], but the root is an atomic `Arc`
+//! (`arc-swap`) so:
 //!
 //! * **reads are wait-free** (atomic `Arc` load + immutable walk),
 //! * **writes are lock-free** (path-copy + atomic root swap; retry only on a
@@ -14,6 +15,9 @@
 //! genuinely wait-free *write* path (per-shard flat combining) lives in the
 //! source prototype; this crate ships the lock-free baseline, which is the right
 //! fit for an in-DRAM metadata cache.
+//!
+//! `concurrent` implies `std`, so this module is always compiled on the std tier
+//! — its heap imports are unconditional.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -114,19 +118,20 @@ fn shard_index(key: &[u8], n: usize) -> usize {
 }
 
 /// Lock-free concurrent ordered radix map.
-pub struct ConcurrentRadixMap<V> {
+pub struct ShardedRadixOrderedMap<V> {
     shards: Vec<ArcSwap<Node<V>>>,
     shard_prefix: usize,
     retries: AtomicU64,
 }
 
-impl<V: Clone> ConcurrentRadixMap<V> {
+impl<V: Clone> ShardedRadixOrderedMap<V> {
     /// `shard_prefix` = number of leading key bytes used to pick a shard.
     /// Use the key length for whole-key sharding, or a logical prefix (e.g. the
     /// 8-byte inode) to keep one object's keys in one shard for local scans.
+    #[must_use]
     pub fn new(shard_count: usize, shard_prefix: usize) -> Self {
         assert!(shard_count >= 1 && shard_prefix >= 1);
-        ConcurrentRadixMap {
+        ShardedRadixOrderedMap {
             shards: (0..shard_count).map(|_| ArcSwap::from_pointee(Node::empty())).collect(),
             shard_prefix,
             retries: AtomicU64::new(0),
@@ -152,12 +157,14 @@ impl<V: Clone> ConcurrentRadixMap<V> {
     }
 
     /// Wait-free point read.
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<V> {
         let root = self.shards[self.shard_of(key)].load_full();
         get_rec(&root, key).cloned()
     }
 
     /// Ordered range scan; single-shard when `lo`/`hi` share the shard prefix.
+    #[must_use]
     pub fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Vec<u8>, V)> {
         let mut out = Vec::new();
         let p = self.shard_prefix.min(lo.len()).min(hi.len());
@@ -175,25 +182,28 @@ impl<V: Clone> ConcurrentRadixMap<V> {
     }
 
     /// O(shards) immutable snapshot.
-    pub fn snapshot(&self) -> Snapshot<V> {
-        Snapshot {
+    #[must_use]
+    pub fn snapshot(&self) -> ShardedRadixSnapshot<V> {
+        ShardedRadixSnapshot {
             roots: self.shards.iter().map(|s| s.load_full()).collect(),
             shard_prefix: self.shard_prefix,
         }
     }
 
+    #[must_use]
     pub fn retries(&self) -> u64 {
         self.retries.load(Ordering::Relaxed)
     }
 }
 
-/// An immutable, isolated point-in-time view of a [`ConcurrentRadixMap`].
-pub struct Snapshot<V> {
+/// An immutable, isolated point-in-time view of a [`ShardedRadixOrderedMap`].
+pub struct ShardedRadixSnapshot<V> {
     roots: Vec<Arc<Node<V>>>,
     shard_prefix: usize,
 }
 
-impl<V: Clone> Snapshot<V> {
+impl<V: Clone> ShardedRadixSnapshot<V> {
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<V> {
         let p = self.shard_prefix.min(key.len());
         let idx = shard_index(&key[..p], self.roots.len());
@@ -207,7 +217,7 @@ mod tests {
 
     #[test]
     fn basics_and_snapshot() {
-        let m: ConcurrentRadixMap<u32> = ConcurrentRadixMap::new(8, 1);
+        let m: ShardedRadixOrderedMap<u32> = ShardedRadixOrderedMap::new(8, 1);
         m.insert(b"k", 1);
         let snap = m.snapshot();
         m.insert(b"k", 2);
@@ -217,11 +227,11 @@ mod tests {
 
     #[test]
     fn ordered_range_same_prefix_single_shard() {
-        let m: ConcurrentRadixMap<u32> = ConcurrentRadixMap::new(16, 1);
+        let m: ShardedRadixOrderedMap<u32> = ShardedRadixOrderedMap::new(16, 1);
         for (k, v) in [(b"i5", 5u32), (b"i1", 1), (b"i3", 3)] {
             m.insert(k, v);
         }
         let got: Vec<u32> = m.range(b"i0", b"i9").into_iter().map(|(_, v)| v).collect();
-        assert_eq!(got, alloc::vec![1, 3, 5]);
+        assert_eq!(got, [1, 3, 5]);
     }
 }

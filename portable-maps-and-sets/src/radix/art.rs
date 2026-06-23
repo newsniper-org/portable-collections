@@ -1,35 +1,54 @@
-//! `ArtCowMap` — a path-compressed **Adaptive Radix Tree** with copy-on-write
+//! `ArtOrderedMap` — a path-compressed **Adaptive Radix Tree** with copy-on-write
 //! and O(1) snapshots. `no_std`, `unsafe`-free.
 //!
-//! The backbone-decision experiment requested by `filesystem-researches`: close
-//! the naive byte-radix's depth/memory gap with the two techniques their key
-//! entropy demands — **path compression** (lazy-expansion leaves + a per-inner
-//! compressed prefix) collapses the shared 8-byte inode prefix to ~1 node, and
-//! **adaptive nodes** (Node4 → Node16 → Node48 → Node256) keep the random `h64`
-//! fan-out shallow-and-wide instead of one node per byte — while preserving the
-//! CoW O(1) snapshot (root `Arc` clone) that is the whole reason to use radix.
+//! Closes the naive byte-radix's depth/memory gap with the two techniques the
+//! key entropy demands — **path compression** (lazy-expansion leaves + a
+//! per-inner compressed prefix) collapses the shared 8-byte inode prefix to ~1
+//! node, and **adaptive nodes** (Node4 → Node16 → Node48 → Node256) keep the
+//! random `h64` fan-out shallow-and-wide instead of one node per byte — while
+//! preserving the CoW O(1) snapshot (root `Arc` clone) that is the whole reason
+//! to use radix.
 //!
-//! Node-type growth is a **node replacement** (a new larger
-//! node is built and the parent is path-copied to point at it), never an in-place
-//! mutation — so the structure stays SMO-free and the concurrent variant's
-//! writes stay lock-free / reads wait-free.
+//! Node-type growth is a **node replacement** (a new larger node is built and
+//! the parent is path-copied to point at it), never an in-place mutation — so
+//! the structure stays SMO-free and the concurrent variant
+//! ([`ShardedArtOrderedMap`](crate::radix::ShardedArtOrderedMap), in
+//! `concurrent_art.rs`) keeps lock-free writes / wait-free reads.
 //!
 //! Keys must be **non-prefix-free** (no key a prefix of another) — fixed-width
 //! keys, as the FS uses, satisfy this. Values are `V: Clone`.
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use portable_collection_primitives::ifstd;
+
+ifstd!({
+    use std::sync::Arc;
+    use std::vec::Vec;
+} else {
+    use portable_collection_primitives::ifalloc;
+    ifalloc!({
+        extern crate alloc;
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+    });
+});
+
+use portable_collection_primitives::Container;
 
 use super::traits::{OrderedMap, SnapshotMap};
 
-enum Node<V> {
+// `pub(super)` so the concurrent ART (`concurrent_art.rs`, a sibling module
+// under `radix`) can reuse the node type and the two recursive helpers.
+pub(super) enum Node<V> {
     Leaf { key: Vec<u8>, value: V },
     Inner { prefix: Vec<u8>, children: Children<V> },
 }
 
 /// Adaptive child container. N4/N16 are sorted `(byte -> child)` arrays; N48 is a
 /// 256-entry index into a dense slot vec; N256 is a direct 256-way array.
-enum Children<V> {
+//
+// `pub(super)` only because it appears in `Node::Inner`'s field (a `pub(super)`
+// enum can't expose a more-private type); nothing outside this module uses it.
+pub(super) enum Children<V> {
     N4 { keys: Vec<u8>, kids: Vec<Arc<Node<V>>> },
     N16 { keys: Vec<u8>, kids: Vec<Arc<Node<V>>> },
     N48 { index: Vec<u8>, kids: Vec<Arc<Node<V>>> }, // index[byte]==0 empty else slot+1
@@ -101,7 +120,6 @@ impl<V> Children<V> {
             Children::N256 { .. } => 3,
         }
     }
-
 }
 
 impl<V: Clone> Children<V> {
@@ -210,7 +228,9 @@ fn grow48_to_256<V: Clone>(index: &[u8], kids: &[Arc<Node<V>>]) -> Children<V> {
 /// new) -> bool`. Returns `None` when the insert is a no-op (existing key whose
 /// `replace` says keep) — the basis for monotone (seq-gated) apply. A split for
 /// a *new* key always applies.
-fn insert_rec_with<V: Clone, R: Fn(&V, &V) -> bool>(
+///
+/// `pub(super)` so the concurrent ART can drive a seq-gated `replace`.
+pub(super) fn insert_rec_with<V: Clone, R: Fn(&V, &V) -> bool>(
     node: &Arc<Node<V>>,
     key: &[u8],
     depth: usize,
@@ -280,7 +300,8 @@ fn children_clone<V: Clone>(c: &Children<V>) -> Children<V> {
     }
 }
 
-fn get_rec<'a, V>(node: &'a Node<V>, key: &[u8], depth: usize) -> Option<&'a V> {
+/// `pub(super)` so the concurrent ART can reuse the read path.
+pub(super) fn get_rec<'a, V>(node: &'a Node<V>, key: &[u8], depth: usize) -> Option<&'a V> {
     match node {
         Node::Leaf { key: lk, value } => {
             if lk.as_slice() == key {
@@ -323,20 +344,44 @@ fn collect<V: Clone>(node: &Node<V>, path: &mut Vec<u8>, lo: &[u8], hi: &[u8], o
 }
 
 /// Path-compressed adaptive radix tree (CoW, O(1) snapshots).
-pub struct ArtCowMap<V> {
+///
+/// ```
+/// use portable_maps_and_sets::radix::{ArtOrderedMap, OrderedMap, SnapshotMap};
+///
+/// fn k(a: u64, b: u64) -> [u8; 16] {
+///     let mut x = [0u8; 16];
+///     x[0..8].copy_from_slice(&a.to_be_bytes());
+///     x[8..16].copy_from_slice(&b.to_be_bytes());
+///     x
+/// }
+///
+/// let mut m: ArtOrderedMap<u32> = ArtOrderedMap::new();
+/// m.insert(&k(1, 1), 10);
+/// m.insert(&k(1, 2), 20);
+/// let snap = m.snapshot();                 // O(1)
+/// m.insert(&k(1, 1), 99);
+/// assert_eq!(m.get(&k(1, 1)), Some(&99));
+/// assert_eq!(snap.get(&k(1, 1)), Some(&10)); // snapshot isolated
+/// ```
+pub struct ArtOrderedMap<V> {
     root: Option<Arc<Node<V>>>,
     len: usize,
 }
 
-impl<V: Clone> Default for ArtCowMap<V> {
+impl<V: Clone> Default for ArtOrderedMap<V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<V: Clone> ArtCowMap<V> {
-    pub fn new() -> Self {
-        ArtCowMap { root: None, len: 0 }
+impl<V: Clone> ArtOrderedMap<V> {
+    /// Create an empty map. `const` because the empty root is `None` (no
+    /// allocation) — unlike [`RadixOrderedMap::new`].
+    ///
+    /// [`RadixOrderedMap::new`]: crate::radix::RadixOrderedMap::new
+    #[must_use]
+    pub const fn new() -> Self {
+        ArtOrderedMap { root: None, len: 0 }
     }
 
     /// Non-allocating ordered range visitor.
@@ -368,9 +413,11 @@ impl<V: Clone> ArtCowMap<V> {
             rec(r, &mut path, lo, hi, &mut f);
         }
     }
+}
 
-    // ---- metrics (the backbone-decision criteria) ----
-
+// --- metrics (the backbone-decision criteria; debug/test/bench only) ---
+#[doc(hidden)]
+impl<V: Clone> ArtOrderedMap<V> {
     pub fn node_count(&self) -> usize {
         fn rec<V>(n: &Node<V>) -> usize {
             match n {
@@ -444,7 +491,7 @@ impl<V: Clone> ArtCowMap<V> {
     }
 }
 
-impl<V: Clone> OrderedMap<V> for ArtCowMap<V> {
+impl<V: Clone> OrderedMap<V> for ArtOrderedMap<V> {
     fn insert(&mut self, key: &[u8], value: V) -> Option<V> {
         let old = self.get(key).cloned();
         self.root = Some(match &self.root {
@@ -475,14 +522,26 @@ impl<V: Clone> OrderedMap<V> for ArtCowMap<V> {
     }
 }
 
-impl<V: Clone> SnapshotMap<V> for ArtCowMap<V> {
-    type Snapshot = ArtCowMap<V>;
+impl<V: Clone> SnapshotMap<V> for ArtOrderedMap<V> {
+    type Snapshot = ArtOrderedMap<V>;
     /// O(1): clone the root `Arc`.
     fn snapshot(&self) -> Self::Snapshot {
-        ArtCowMap {
+        ArtOrderedMap {
             root: self.root.clone(),
             len: self.len,
         }
+    }
+}
+
+impl<V: Clone> Container for ArtOrderedMap<V> {
+    /// Reset to empty — writes root and `len` together (the shared invariant).
+    fn clear(&mut self) {
+        self.root = None;
+        self.len = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -500,18 +559,18 @@ mod tests {
 
     #[test]
     fn basics() {
-        let mut m: ArtCowMap<u32> = ArtCowMap::new();
+        let mut m: ArtOrderedMap<u32> = ArtOrderedMap::new();
         assert_eq!(m.insert(&k(1, 1), 10), None);
         assert_eq!(m.insert(&k(1, 2), 20), None);
         assert_eq!(m.insert(&k(1, 1), 99), Some(10));
         assert_eq!(m.get(&k(1, 1)), Some(&99));
         assert_eq!(m.get(&k(9, 9)), None);
-        assert_eq!(m.len(), 2);
+        assert_eq!(OrderedMap::len(&m), 2);
     }
 
     #[test]
     fn snapshot_isolated() {
-        let mut m: ArtCowMap<u32> = ArtCowMap::new();
+        let mut m: ArtOrderedMap<u32> = ArtOrderedMap::new();
         m.insert(&k(1, 1), 1);
         let s = m.snapshot();
         m.insert(&k(1, 1), 2);
@@ -522,9 +581,21 @@ mod tests {
     }
 
     #[test]
+    fn container_clear_and_len() {
+        let mut m: ArtOrderedMap<u32> = ArtOrderedMap::new();
+        m.insert(&k(1, 1), 1);
+        m.insert(&k(2, 2), 2);
+        assert_eq!(Container::len(&m), 2);
+        Container::clear(&mut m);
+        assert_eq!(Container::len(&m), 0);
+        assert!(Container::is_empty(&m));
+        assert_eq!(m.get(&k(1, 1)), None);
+    }
+
+    #[test]
     fn differential_vs_btreemap_with_node_growth() {
         // Insert enough keys under one inode to force N4->N16->N48->N256 growth.
-        let mut art: ArtCowMap<u64> = ArtCowMap::new();
+        let mut art: ArtOrderedMap<u64> = ArtOrderedMap::new();
         let mut bt: BTreeMap<[u8; 16], u64> = BTreeMap::new();
         let mut x = 0x1234_5678u64;
         for _ in 0..6000 {
@@ -537,7 +608,7 @@ mod tests {
         for (key, v) in &bt {
             assert_eq!(art.get(key), Some(v), "lookup mismatch");
         }
-        assert_eq!(art.len(), bt.len());
+        assert_eq!(OrderedMap::len(&art), bt.len());
         // range (one inode) matches BTreeMap
         let lo = k(2, 0);
         let hi = k(2, u64::MAX);
@@ -549,188 +620,5 @@ mod tests {
         // node growth actually happened
         let h = art.node_type_histogram();
         assert!(h[3] > 0 || h[2] > 0, "expected wide nodes (N48/N256), got {h:?}");
-    }
-}
-
-// ---- concurrent, seq-stamped ART backbone (lock-free) ----
-// Closes criterion (B)6 (lock-free node-type growth) AND the LVIAARC interface:
-// values carry an `op_seq` for monotone apply (FIX2), plus a public batch-apply
-// (sorted ops -> one root transition per shard) and per-key / integrated
-// generation queries.
-#[cfg(feature = "concurrent")]
-pub use conc::{ArtSnapshot, ConcurrentArt};
-
-#[cfg(feature = "concurrent")]
-mod conc {
-    use super::{get_rec, insert_rec_with, Node};
-    use alloc::sync::Arc;
-    use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    use arc_swap::ArcSwapOption;
-
-    // Each value is `(op_seq, V)`; apply is monotone (a write lands only if its
-    // op_seq exceeds the resident one) — this is the FS prototype's FIX2.
-    type Root<V> = Option<Arc<Node<(u64, V)>>>;
-    type Slot<V> = ArcSwapOption<Node<(u64, V)>>;
-
-    fn shard_of(key: &[u8], prefix: usize, n: usize) -> usize {
-        let mut h = 0xcbf2_9ce4_8422_2325u64;
-        for &b in &key[..prefix.min(key.len())] {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        (h % n as u64) as usize
-    }
-
-    /// Monotone CoW insert into a (possibly empty) shard root. Returns `None` if
-    /// the write is superseded (resident op_seq >= new) — a no-op.
-    fn insert_mono<V: Clone>(root: &Root<V>, key: &[u8], value: V, seq: u64) -> Root<V> {
-        match root {
-            None => Some(Arc::new(Node::Leaf { key: key.to_vec(), value: (seq, value) })),
-            Some(r) => insert_rec_with(r, key, 0, (seq, value), &|o: &(u64, V), n: &(u64, V)| n.0 > o.0),
-        }
-    }
-
-    /// Lock-free, seq-stamped concurrent Adaptive Radix Tree — the LVIAARC
-    /// backbone. ART node-type growth (N4→16→48→256) is a pure CoW **node
-    /// replacement**, so every write (single or batched) commits as one atomic
-    /// root CAS per shard: **wait-free reads, lock-free writes, Arc reclamation,
-    /// SMO-free**.
-    pub struct ConcurrentArt<V> {
-        shards: Vec<Slot<V>>,
-        /// Per-shard max applied op_seq — lets recovery bound each shard's scan
-        /// independently (a global max can't, if one shard races ahead).
-        shard_max: Vec<AtomicU64>,
-        prefix: usize,
-        seq_gen: AtomicU64,
-        max_seq: AtomicU64,
-    }
-
-    impl<V: Clone> ConcurrentArt<V> {
-        /// `shard_prefix` = leading key bytes used to pick a shard (e.g. 8 = inode).
-        pub fn new(shard_count: usize, shard_prefix: usize) -> Self {
-            assert!(shard_count >= 1 && shard_prefix >= 1);
-            ConcurrentArt {
-                shards: (0..shard_count).map(|_| ArcSwapOption::empty()).collect(),
-                shard_max: (0..shard_count).map(|_| AtomicU64::new(0)).collect(),
-                prefix: shard_prefix,
-                seq_gen: AtomicU64::new(1),
-                max_seq: AtomicU64::new(0),
-            }
-        }
-
-        fn slot(&self, key: &[u8]) -> &Slot<V> {
-            &self.shards[shard_of(key, self.prefix, self.shards.len())]
-        }
-
-        /// Convenience insert (auto op_seq, monotone last-writer-wins).
-        pub fn insert(&self, key: &[u8], value: V) {
-            let seq = self.seq_gen.fetch_add(1, Ordering::Relaxed);
-            self.apply(key, value, seq);
-        }
-
-        /// **Apply** one op with a caller-supplied `op_seq` (monotone — FIX2). The
-        /// caller (e.g. LVIAARC) owns the op-sequence space; the backbone only
-        /// requires it be monotonic per key.
-        pub fn apply(&self, key: &[u8], value: V, op_seq: u64) {
-            let idx = shard_of(key, self.prefix, self.shards.len());
-            self.shards[idx].rcu(|cur| insert_mono(cur, key, value.clone(), op_seq).or_else(|| cur.clone()));
-            self.shard_max[idx].fetch_max(op_seq, Ordering::Relaxed);
-            self.max_seq.fetch_max(op_seq, Ordering::Relaxed);
-        }
-
-        /// **Batch-apply** (the LVIAARC flush primitive): fold a whole `(key,
-        /// value, op_seq)` batch into **one root transition per shard** — the
-        /// public generalization of the prototype's `help` combine. Atomic
-        /// per shard (one CAS), monotone, order-independent.
-        pub fn apply_batch(&self, ops: &[(Vec<u8>, V, u64)]) {
-            if ops.is_empty() {
-                return;
-            }
-            let n = self.shards.len();
-            let mut by_shard: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
-            let mut shard_maxseq = alloc::vec![0u64; n];
-            let mut maxseq = 0u64;
-            for (i, (k, _, seq)) in ops.iter().enumerate() {
-                let sh = shard_of(k, self.prefix, n);
-                by_shard[sh].push(i);
-                shard_maxseq[sh] = shard_maxseq[sh].max(*seq);
-                maxseq = maxseq.max(*seq);
-            }
-            for (sh, idxs) in by_shard.iter().enumerate() {
-                if idxs.is_empty() {
-                    continue;
-                }
-                self.shards[sh].rcu(|cur| {
-                    let mut root = cur.clone();
-                    for &i in idxs {
-                        let (k, v, seq) = &ops[i];
-                        if let Some(nr) = insert_mono(&root, k, v.clone(), *seq) {
-                            root = Some(nr);
-                        }
-                    }
-                    root
-                });
-                self.shard_max[sh].fetch_max(shard_maxseq[sh], Ordering::Relaxed);
-            }
-            self.max_seq.fetch_max(maxseq, Ordering::Relaxed);
-        }
-
-        /// Wait-free point read.
-        pub fn get(&self, key: &[u8]) -> Option<V> {
-            self.slot(key).load_full().and_then(|r| get_rec(&r, key, 0).map(|(_, v)| v.clone()))
-        }
-
-        /// Per-key **integrated generation**: the `op_seq` under which `key` is in
-        /// the backbone (LVIAARC's recovery dominance query). `None` if absent.
-        pub fn key_seq(&self, key: &[u8]) -> Option<u64> {
-            self.slot(key).load_full().and_then(|r| get_rec(&r, key, 0).map(|(s, _)| *s))
-        }
-
-        /// Coarse integrated generation: max `op_seq` ever applied (fast-path
-        /// "is everything up to seq S already in the backbone?").
-        pub fn integrated_generation(&self) -> u64 {
-            self.max_seq.load(Ordering::Relaxed)
-        }
-
-        /// Number of shards (recovery iterates these).
-        pub fn num_shards(&self) -> usize {
-            self.shards.len()
-        }
-
-        /// The shard a key maps to (inode-prefix hash) — so the cache can group
-        /// its own ops per shard for `apply_batch` / recovery.
-        pub fn shard_index(&self, key: &[u8]) -> usize {
-            shard_of(key, self.prefix, self.shards.len())
-        }
-
-        /// **Per-shard** max applied op_seq — recovery scans shard `s` need only
-        /// reconcile cached ops with seq > `shard_max_seq(s)` (a global max
-        /// over-scans when one shard races ahead). Low-priority companion to
-        /// `key_seq` / `integrated_generation`.
-        pub fn shard_max_seq(&self, shard: usize) -> u64 {
-            self.shard_max[shard].load(Ordering::Relaxed)
-        }
-
-        /// O(shards) immutable snapshot.
-        pub fn snapshot(&self) -> ArtSnapshot<V> {
-            ArtSnapshot {
-                roots: self.shards.iter().map(|s| s.load_full()).collect(),
-                prefix: self.prefix,
-            }
-        }
-    }
-
-    pub struct ArtSnapshot<V> {
-        roots: Vec<Root<V>>,
-        prefix: usize,
-    }
-
-    impl<V: Clone> ArtSnapshot<V> {
-        pub fn get(&self, key: &[u8]) -> Option<V> {
-            let idx = shard_of(key, self.prefix, self.roots.len());
-            self.roots[idx].as_ref().and_then(|r| get_rec(r, key, 0).map(|(_, v)| v.clone()))
-        }
     }
 }

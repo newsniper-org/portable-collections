@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use portable_maps_and_sets::radix::{ArtCowMap, CowRadixMap, OrderedMap, SnapshotMap};
+use portable_maps_and_sets::radix::{ArtOrderedMap, RadixOrderedMap, OrderedMap, SnapshotMap};
 
 const DIRS: u64 = 4_000;
 const PER_DIR: u64 = 64;
@@ -68,14 +68,14 @@ fn main() {
 
     // ---- insert ----
     let t = Instant::now();
-    let mut radix: CowRadixMap<u64> = CowRadixMap::new();
+    let mut radix: RadixOrderedMap<u64> = RadixOrderedMap::new();
     for (i, k) in keys.iter().enumerate() {
         radix.insert(k, i as u64);
     }
     let r_ins = s(t);
 
     let t = Instant::now();
-    let mut art: ArtCowMap<u64> = ArtCowMap::new();
+    let mut art: ArtOrderedMap<u64> = ArtOrderedMap::new();
     for (i, k) in keys.iter().enumerate() {
         art.insert(k, i as u64);
     }

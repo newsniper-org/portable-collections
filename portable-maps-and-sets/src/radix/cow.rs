@@ -1,13 +1,26 @@
-//! `CowRadixMap` — persistent (copy-on-write) ordered byte-radix map.
+//! `RadixOrderedMap` — persistent (copy-on-write) ordered byte-radix map.
 //!
 //! `no_std` + zero-dependency + `unsafe`-free. Nodes are immutable and shared
-//! via `alloc::sync::Arc`; an insert path-copies the touched path (sharing all
-//! untouched subtrees), so a snapshot is just an `Arc` clone of the root — O(1),
-//! and fully isolated from later writes (the defining persistent-structure
-//! property, and the CoW crash-consistency primitive a filesystem wants).
+//! via `Arc`; an insert path-copies the touched path (sharing all untouched
+//! subtrees), so a snapshot is just an `Arc` clone of the root — O(1), and fully
+//! isolated from later writes (the defining persistent-structure property, and
+//! the CoW crash-consistency primitive a filesystem wants).
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use portable_collection_primitives::ifstd;
+
+ifstd!({
+    use std::sync::Arc;
+    use std::vec::Vec;
+} else {
+    use portable_collection_primitives::ifalloc;
+    ifalloc!({
+        extern crate alloc;
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+    });
+});
+
+use portable_collection_primitives::Container;
 
 use super::traits::{OrderedMap, SnapshotMap};
 
@@ -127,36 +140,49 @@ fn count<V>(node: &Node<V>) -> usize {
 
 /// Persistent (copy-on-write) ordered radix map. Nodes are heap-allocated and
 /// shared behind `Arc`; updates path-copy.
-pub struct CowRadixMap<V> {
+///
+/// ```
+/// use portable_maps_and_sets::radix::{RadixOrderedMap, OrderedMap, SnapshotMap};
+///
+/// let mut m: RadixOrderedMap<u32> = RadixOrderedMap::new();
+/// assert_eq!(m.insert(b"abc", 1), None);
+/// m.insert(b"abd", 2);
+/// let snap = m.snapshot();            // O(1), isolated
+/// m.insert(b"abc", 9);                // overwrite the live map
+/// assert_eq!(m.get(b"abc"), Some(&9));
+/// assert_eq!(snap.get(b"abc"), Some(&1)); // snapshot frozen
+/// let vals: Vec<u32> = m.range(b"ab", b"abz").into_iter().map(|(_, v)| v).collect();
+/// assert_eq!(vals, [9, 2]);           // ascending by key: "abc", "abd"
+/// ```
+pub struct RadixOrderedMap<V> {
     root: Arc<Node<V>>,
     len: usize,
 }
 
-impl<V: Clone> Default for CowRadixMap<V> {
+impl<V: Clone> Default for RadixOrderedMap<V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<V: Clone> CowRadixMap<V> {
+impl<V: Clone> RadixOrderedMap<V> {
+    /// Create an empty map.
+    ///
+    /// Not a `const fn`: the empty root is an `Arc::new(..)` allocation, and
+    /// `Arc::new` is not `const` on stable. (Contrast [`ArtOrderedMap::new`],
+    /// whose empty root is `None` and so is `const`.)
+    ///
+    /// [`ArtOrderedMap::new`]: crate::radix::ArtOrderedMap::new
+    #[must_use]
     pub fn new() -> Self {
-        CowRadixMap {
+        RadixOrderedMap {
             root: Arc::new(Node::empty()),
             len: 0,
         }
     }
-
-    /// Number of allocated nodes — grows with distinct key bytes, never with
-    /// rebalancing (there is none). Handy for memory accounting / tests.
-    pub fn node_count(&self) -> usize {
-        fn rec<V>(n: &Node<V>) -> usize {
-            1 + n.children.iter().map(|(_, c)| rec(c)).sum::<usize>()
-        }
-        rec(&self.root)
-    }
 }
 
-impl<V: Clone> OrderedMap<V> for CowRadixMap<V> {
+impl<V: Clone> OrderedMap<V> for RadixOrderedMap<V> {
     fn insert(&mut self, key: &[u8], value: V) -> Option<V> {
         let (new_root, old) = insert_rec(&self.root, key, value);
         self.root = Arc::new(new_root);
@@ -182,28 +208,34 @@ impl<V: Clone> OrderedMap<V> for CowRadixMap<V> {
     }
 }
 
-impl<V: Clone> SnapshotMap<V> for CowRadixMap<V> {
-    type Snapshot = CowRadixMap<V>;
+impl<V: Clone> SnapshotMap<V> for RadixOrderedMap<V> {
+    type Snapshot = RadixOrderedMap<V>;
 
     /// O(1): clone the root `Arc`. The snapshot shares structure with the live
     /// map but is isolated — later inserts path-copy and never mutate shared
     /// nodes.
     fn snapshot(&self) -> Self::Snapshot {
-        CowRadixMap {
+        RadixOrderedMap {
             root: self.root.clone(),
             len: self.len,
         }
     }
 }
 
-// `count` is used by tests/consumers to validate `len` against a fresh walk.
-impl<V: Clone> CowRadixMap<V> {
-    pub fn recount(&self) -> usize {
-        count(&self.root)
+impl<V: Clone> Container for RadixOrderedMap<V> {
+    /// Reset to empty — writes root and `len` together (the shared invariant:
+    /// every mutation touches both).
+    fn clear(&mut self) {
+        self.root = Arc::new(Node::empty());
+        self.len = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
-impl<V> CowRadixMap<V> {
+impl<V> RadixOrderedMap<V> {
     /// Visit every `(key, &value)` in `[lo, hi]` in ascending order, without
     /// allocating a result vector or cloning keys/values (the non-materializing
     /// counterpart to [`OrderedMap::range`]).
@@ -229,35 +261,53 @@ impl<V> CowRadixMap<V> {
     }
 }
 
+// --- diagnostics (debug / test / bench only; hidden from the public API docs) ---
+#[doc(hidden)]
+impl<V: Clone> RadixOrderedMap<V> {
+    /// Number of allocated nodes — grows with distinct key bytes, never with
+    /// rebalancing (there is none). Memory accounting / tests.
+    pub fn node_count(&self) -> usize {
+        fn rec<V>(n: &Node<V>) -> usize {
+            1 + n.children.iter().map(|(_, c)| rec(c)).sum::<usize>()
+        }
+        rec(&self.root)
+    }
+
+    /// Recount `len` from a fresh walk (validates the cached `len`).
+    pub fn recount(&self) -> usize {
+        count(&self.root)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn insert_get_overwrite_len() {
-        let mut m: CowRadixMap<u32> = CowRadixMap::new();
+        let mut m: RadixOrderedMap<u32> = RadixOrderedMap::new();
         assert_eq!(m.insert(b"abc", 1), None);
         assert_eq!(m.insert(b"abd", 2), None);
         assert_eq!(m.insert(b"abc", 9), Some(1));
         assert_eq!(m.get(b"abc"), Some(&9));
         assert_eq!(m.get(b"abz"), None);
-        assert_eq!(m.len(), 2);
+        assert_eq!(OrderedMap::len(&m), 2);
         assert_eq!(m.recount(), 2);
     }
 
     #[test]
     fn ordered_range() {
-        let mut m: CowRadixMap<u32> = CowRadixMap::new();
+        let mut m: RadixOrderedMap<u32> = RadixOrderedMap::new();
         for (k, v) in [(b"50", 50u32), (b"10", 10), (b"30", 30), (b"20", 20)] {
             m.insert(k, v);
         }
-        let got: alloc::vec::Vec<u32> = m.range(b"00", b"99").into_iter().map(|(_, v)| v).collect();
-        assert_eq!(got, alloc::vec![10, 20, 30, 50]);
+        let got: Vec<u32> = m.range(b"00", b"99").into_iter().map(|(_, v)| v).collect();
+        assert_eq!(got, [10, 20, 30, 50]);
     }
 
     #[test]
     fn snapshot_is_isolated_and_o1() {
-        let mut m: CowRadixMap<u32> = CowRadixMap::new();
+        let mut m: RadixOrderedMap<u32> = RadixOrderedMap::new();
         m.insert(b"k", 1);
         let snap = m.snapshot(); // O(1)
         m.insert(b"k", 2);
@@ -266,5 +316,19 @@ mod tests {
         assert_eq!(snap.get(b"new"), None);
         assert_eq!(m.get(b"k"), Some(&2));
         assert_eq!(m.get(b"new"), Some(&3));
+    }
+
+    #[test]
+    fn container_clear_and_len() {
+        let mut m: RadixOrderedMap<u32> = RadixOrderedMap::new();
+        m.insert(b"a", 1);
+        m.insert(b"b", 2);
+        assert_eq!(Container::len(&m), 2);
+        assert!(!Container::is_empty(&m));
+        Container::clear(&mut m);
+        assert_eq!(Container::len(&m), 0);
+        assert!(Container::is_empty(&m));
+        assert_eq!(m.get(b"a"), None);
+        assert_eq!(m.recount(), 0);
     }
 }

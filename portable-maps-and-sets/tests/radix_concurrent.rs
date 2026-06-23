@@ -4,7 +4,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use portable_maps_and_sets::radix::ConcurrentRadixMap;
+use portable_maps_and_sets::radix::ShardedRadixOrderedMap;
 
 fn k(inode: u64, off: u64) -> [u8; 16] {
     let mut b = [0u8; 16];
@@ -17,7 +17,7 @@ fn k(inode: u64, off: u64) -> [u8; 16] {
 fn disjoint_concurrent_writes() {
     let threads = 8;
     let per = 20_000u64;
-    let map = Arc::new(ConcurrentRadixMap::<u64>::new(64, 8)); // shard by inode prefix
+    let map = Arc::new(ShardedRadixOrderedMap::<u64>::new(64, 8)); // shard by inode prefix
     let barrier = Arc::new(Barrier::new(threads));
     let handles: Vec<_> = (0..threads)
         .map(|t| {
@@ -45,7 +45,7 @@ fn disjoint_concurrent_writes() {
 fn snapshot_isolation_under_writes() {
     let threads = 6;
     let n = 2_000u64;
-    let map = Arc::new(ConcurrentRadixMap::<u64>::new(32, 8));
+    let map = Arc::new(ShardedRadixOrderedMap::<u64>::new(32, 8));
     for i in 0..n {
         map.insert(&k(1, i), i);
     }
@@ -74,7 +74,7 @@ fn snapshot_isolation_under_writes() {
 
 #[test]
 fn per_inode_range_is_local_and_ordered() {
-    let map = ConcurrentRadixMap::<u64>::new(32, 8);
+    let map = ShardedRadixOrderedMap::<u64>::new(32, 8);
     for i in [5u64, 1, 9, 3, 7] {
         map.insert(&k(42, i), i);
     }
@@ -89,12 +89,12 @@ fn per_inode_range_is_local_and_ordered() {
 
 #[test]
 fn concurrent_art_node_growth_and_snapshot() {
-    use portable_maps_and_sets::radix::ConcurrentArt;
+    use portable_maps_and_sets::radix::ShardedArtOrderedMap;
     let threads = 8;
     let per = 10_000u64;
     // Few inodes so many dirents hash into the same shard/inode subtree, forcing
     // N4->N16->N48->N256 growth *concurrently* under lock-free rcu inserts.
-    let map = Arc::new(ConcurrentArt::<u64>::new(16, 8));
+    let map = Arc::new(ShardedArtOrderedMap::<u64>::new(16, 8));
     let barrier = Arc::new(Barrier::new(threads));
     let handles: Vec<_> = (0..threads)
         .map(|t| {
@@ -129,8 +129,8 @@ fn concurrent_art_node_growth_and_snapshot() {
 
 #[test]
 fn art_batch_apply_equals_sequential_and_generation() {
-    use portable_maps_and_sets::radix::ConcurrentArt;
-    let m = ConcurrentArt::<u64>::new(16, 8);
+    use portable_maps_and_sets::radix::ShardedArtOrderedMap;
+    let m = ShardedArtOrderedMap::<u64>::new(16, 8);
     // A flush batch: (key, value, op_seq). Includes an out-of-order + a stale dup.
     let batch: Vec<(Vec<u8>, u64, u64)> = vec![
         (k(1, 10).to_vec(), 100, 5),
@@ -160,10 +160,10 @@ fn art_batch_apply_equals_sequential_and_generation() {
 
 #[test]
 fn art_concurrent_batch_apply_threads() {
-    use portable_maps_and_sets::radix::ConcurrentArt;
+    use portable_maps_and_sets::radix::ShardedArtOrderedMap;
     let threads = 8;
     let per = 4_000u64;
-    let map = Arc::new(ConcurrentArt::<u64>::new(64, 8));
+    let map = Arc::new(ShardedArtOrderedMap::<u64>::new(64, 8));
     let barrier = Arc::new(Barrier::new(threads));
     let handles: Vec<_> = (0..threads)
         .map(|t| {
@@ -199,8 +199,8 @@ fn art_concurrent_batch_apply_threads() {
 
 #[test]
 fn art_per_shard_max_seq() {
-    use portable_maps_and_sets::radix::ConcurrentArt;
-    let m = ConcurrentArt::<u64>::new(64, 8);
+    use portable_maps_and_sets::radix::ShardedArtOrderedMap;
+    let m = ShardedArtOrderedMap::<u64>::new(64, 8);
     let a = k(10, 0);
     let b = k(99, 0);
     let (sa, sb) = (m.shard_index(&a), m.shard_index(&b));

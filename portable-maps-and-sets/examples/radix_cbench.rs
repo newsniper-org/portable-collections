@@ -1,4 +1,4 @@
-//! Concurrent throughput of `ConcurrentArt` (lock-free ART): insert scaling,
+//! Concurrent throughput of `ShardedArtOrderedMap` (lock-free ART): insert scaling,
 //! wait-free read scaling, and hot-shard contention.
 //! Run: `cargo run --release --features concurrent --example radix_cbench -- [max_threads]`.
 
@@ -14,7 +14,7 @@ fn main() {
     use std::thread;
     use std::time::Instant;
 
-    use portable_maps_and_sets::radix::ConcurrentArt;
+    use portable_maps_and_sets::radix::ShardedArtOrderedMap;
 
     let max_t: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
     let per: u64 = 400_000; // ops per thread
@@ -26,14 +26,14 @@ fn main() {
         k
     }
 
-    println!("== ConcurrentArt throughput (lock-free ART) — {per} ops/thread ==\n");
+    println!("== ShardedArtOrderedMap throughput (lock-free ART) — {per} ops/thread ==\n");
 
     // ---- (1) insert scaling: disjoint inodes per thread (shards spread) ----
     println!("(1) insert scaling — disjoint inodes (different shards)");
     println!("    threads   M ins/s   scaling");
     let mut base = 0.0;
     for &t in [1usize, 2, 4, 8].iter().filter(|&&t| t <= max_t) {
-        let map = Arc::new(ConcurrentArt::<u64>::new(256, 8));
+        let map = Arc::new(ShardedArtOrderedMap::<u64>::new(256, 8));
         let barrier = Arc::new(Barrier::new(t));
         let start = Instant::now();
         let handles: Vec<_> = (0..t)
@@ -60,7 +60,7 @@ fn main() {
 
     // ---- (2) read scaling: wait-free reads over a populated map ----
     println!("\n(2) wait-free read scaling — over a 1.6M-key map");
-    let map = Arc::new(ConcurrentArt::<u64>::new(256, 8));
+    let map = Arc::new(ShardedArtOrderedMap::<u64>::new(256, 8));
     for inode in 0..25_000u64 {
         for off in 0..64u64 {
             map.insert(&key(inode, off), off);
@@ -106,7 +106,7 @@ fn main() {
     if max_t >= 2 {
         println!("\n(3) hot-shard contention — all {} threads insert into ONE inode (same shard)", max_t.min(8));
         let t = max_t.min(8);
-        let map = Arc::new(ConcurrentArt::<u64>::new(256, 8));
+        let map = Arc::new(ShardedArtOrderedMap::<u64>::new(256, 8));
         let barrier = Arc::new(Barrier::new(t));
         let start = Instant::now();
         let handles: Vec<_> = (0..t)
